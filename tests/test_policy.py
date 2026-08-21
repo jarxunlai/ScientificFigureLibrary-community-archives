@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import binascii
+import hashlib
+import json
 import struct
 import tempfile
 import unittest
@@ -25,6 +27,15 @@ archive = load("validate_archive", "scripts/validate_archive.py")
 
 
 class PolicyTests(unittest.TestCase):
+    @staticmethod
+    def png(width: int = 1, height: int = 1, rgba: bytes = bytes((20, 40, 60, 255))) -> bytes:
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", binascii.crc32(kind + payload) & 0xFFFFFFFF)
+
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+        scanlines = b"".join(b"\x00" + rgba[row * width * 4:(row + 1) * width * 4] for row in range(height))
+        return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(scanlines)) + chunk(b"IEND", b"")
+
     def test_strict_ascii_template_identity(self) -> None:
         for value in ("example-template", "a", "plot.v2"):
             self.assertIsNotNone(compare.TEMPLATE_ID.fullmatch(value))
@@ -71,6 +82,23 @@ class PolicyTests(unittest.TestCase):
         png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"")) + chunk(b"IEND", b"")
         with self.assertRaisesRegex(SystemExit, "canonical RGBA payload exceeds"):
             archive.decode_png_rgba(png)
+
+    def test_post_render_requires_exact_archived_png_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "submission"
+            staging.mkdir()
+            rendered = root / "preview.png"
+            png = self.png()
+            rendered.write_bytes(png)
+            (staging / "render-receipt.json").write_text(json.dumps({
+                "width": 1,
+                "height": 1,
+                "canonicalRgbaSha256": hashlib.sha256(bytes((20, 40, 60, 255))).hexdigest(),
+                "previewSha256": "0" * 64,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "PNG SHA-256 differs"):
+                archive.post_render(staging, rendered)
 
 
 if __name__ == "__main__":

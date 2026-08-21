@@ -557,6 +557,8 @@ def post_render(staging: Path, rendered: Path) -> None:
         fail("sandbox re-rendered PNG dimensions differ from receipt")
     if sha256_bytes(rgba) != receipt.get("canonicalRgbaSha256"):
         fail("sandbox re-rendered canonical RGBA digest differs from receipt")
+    if sha256_bytes(actual) != receipt.get("previewSha256"):
+        fail("sandbox re-rendered PNG SHA-256 differs from archived preview")
     print(json.dumps({"status": "ci_rendered", "width": width, "height": height, "renderedPreviewSha256": sha256_bytes(actual), "archivedPreviewSha256": receipt.get("previewSha256"), "canonicalRgbaSha256": sha256_bytes(rgba)}, sort_keys=True))
 
 

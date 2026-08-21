@@ -52,7 +52,13 @@ jobs:
             trusted/container
           docker image inspect sfl-archive-renderer:r-4.4.3-v1 \
             --format '{{json .RepoDigests}} {{.Id}}' \
-            > "$RUNNER_TEMP/sfl-archive-validation/renderer-image.txt"
+            | tee "$RUNNER_TEMP/sfl-archive-validation/renderer-image.txt"
+          {
+            echo '### Reviewed renderer image identity'
+            echo '```text'
+            cat "$RUNNER_TEMP/sfl-archive-validation/renderer-image.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Re-render untrusted template in hardened container
         shell: bash
         run: |

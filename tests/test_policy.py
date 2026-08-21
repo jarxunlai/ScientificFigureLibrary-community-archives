@@ -30,6 +30,17 @@ archive = load("validate_archive", "scripts/validate_archive.py")
 
 
 class PolicyTests(unittest.TestCase):
+    def test_workflow_run_name_binds_exact_trusted_and_candidate_revisions(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "validate-archive-pr.yml").read_text(encoding="utf-8")
+        base_expression = "${{ github.event.pull_request.base.sha }}"
+        head_expression = "${{ github.event.pull_request.head.sha }}"
+        expected = f"run-name: sfl-archive-validation-v2 base={base_expression} head={head_expression}"
+        run_names = [line for line in workflow.splitlines() if line.lstrip().startswith("run-name:")]
+
+        self.assertEqual(run_names, [expected])
+        self.assertEqual(workflow.count(f"ref: {base_expression}"), 1)
+        self.assertEqual(workflow.count(f"ref: {head_expression}"), 1)
+
     @staticmethod
     def png(width: int = 1, height: int = 1, rgba: bytes = bytes((20, 40, 60, 255))) -> bytes:
         def chunk(kind: bytes, payload: bytes) -> bytes:

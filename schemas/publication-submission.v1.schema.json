@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jarxunlai/ScientificFigureLibrary-community-archives/blob/main/schemas/publication-submission.v1.schema.json",
+  "title": "Scientific Figure Library publication submission v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "providerId", "templateId", "releaseVersion", "contentDigest", "parentLocalRelease", "assets", "rightsAttestation", "excludedPrivateState", "createdAt"],
+  "properties": {
+    "schema": { "const": "figure-library.publication-submission.v1" },
+    "providerId": { "const": "io.github.jarxunlai.scientific-figure-community" },
+    "templateId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,126}[a-z0-9]$" },
+    "releaseVersion": { "type": "string" },
+    "contentDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "parentLocalRelease": { "type": "object" },
+    "assets": { "type": "array", "minItems": 4, "items": { "type": "object" } },
+    "rightsAttestation": { "type": "object" },
+    "excludedPrivateState": { "type": "array", "items": { "type": "string" } },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}

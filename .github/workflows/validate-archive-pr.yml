@@ -1,0 +1,83 @@
+name: validate-archive-pr
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout trusted base validators
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Checkout untrusted candidate without credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Enforce one-new-archive policy
+        id: policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 trusted/scripts/compare_pr_trees.py trusted candidate --github-output "$GITHUB_OUTPUT"
+      - name: Validate and safely extract archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/sfl-archive-validation"
+          rm -rf "$work"
+          python3 trusted/scripts/validate_archive.py \
+            --archive '${{ steps.policy.outputs.archive }}' \
+            --staging "$work/submission"
+      - name: Build reviewed fixed-R renderer
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --pull=false \
+            --tag sfl-archive-renderer:r-4.4.3-v1 \
+            trusted/container
+          docker image inspect sfl-archive-renderer:r-4.4.3-v1 \
+            --format '{{json .RepoDigests}} {{.Id}}' \
+            > "$RUNNER_TEMP/sfl-archive-validation/renderer-image.txt"
+      - name: Re-render untrusted template in hardened container
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/sfl-archive-validation"
+          install -d -m 0777 "$work/output"
+          timeout --signal=KILL 180s docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --cpus 2 \
+            --memory 2g \
+            --memory-swap 2g \
+            --pids-limit 128 \
+            --ulimit nofile=1024:1024 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456 \
+            --mount "type=bind,src=$work/submission,dst=/submission,readonly" \
+            --mount "type=bind,src=$work/output,dst=/output" \
+            sfl-archive-renderer:r-4.4.3-v1 \
+            /submission /output
+      - name: Verify rendered PNG identity and canonical RGBA digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/sfl-archive-validation"
+          python3 trusted/scripts/validate_archive.py \
+            --staging "$work/submission" \
+            --rendered "$work/output/preview.png" \
+            | tee "$work/validation-report.json"

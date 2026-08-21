@@ -1,0 +1,7 @@
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+validation-work/
+__pycache__/
+*.pyc

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import binascii
+import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 
@@ -57,6 +60,17 @@ class PolicyTests(unittest.TestCase):
             target.write_bytes(b"zip")
             added = set(compare.inventory(candidate)) - set(compare.inventory(base))
             self.assertEqual(added, {"archives/example-template/1.0.0/example-template-1.0.0.zip"})
+
+    def test_png_decoder_rejects_oversized_canonical_rgba_before_allocation(self) -> None:
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", binascii.crc32(kind + payload) & 0xFFFFFFFF)
+
+        width = 16_384
+        height = 16_384
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+        png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"")) + chunk(b"IEND", b"")
+        with self.assertRaisesRegex(SystemExit, "canonical RGBA payload exceeds"):
+            archive.decode_png_rgba(png)
 
 
 if __name__ == "__main__":

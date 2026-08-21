@@ -501,12 +501,21 @@ def decode_png_rgba(data: bytes) -> tuple[int, int, bytes]:
     channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
     if channels is None:
         fail("PNG color type is unsupported")
+    if width * height * 4 > 128 * 1024 * 1024:
+        fail("PNG canonical RGBA payload exceeds 128 MiB")
     stride = width * channels
+    expected_raw = height * (stride + 1)
+    if expected_raw > 128 * 1024 * 1024:
+        fail("PNG decompressed scanline payload exceeds 128 MiB")
     try:
-        raw = zlib.decompress(bytes(idat))
+        decompressor = zlib.decompressobj()
+        raw = decompressor.decompress(bytes(idat), expected_raw + 1)
+        if decompressor.unconsumed_tail or len(raw) > expected_raw:
+            fail("PNG IDAT expands beyond its declared dimensions")
+        raw += decompressor.flush(expected_raw + 1 - len(raw))
     except Exception as exc:
         fail(f"PNG IDAT decompression failed: {exc}")
-    if len(raw) != height * (stride + 1):
+    if not decompressor.eof or decompressor.unused_data or len(raw) != expected_raw:
         fail("PNG decompressed size is inconsistent")
     rows: list[bytearray] = []
     pos = 0

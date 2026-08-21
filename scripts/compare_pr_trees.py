@@ -5,8 +5,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
+import re
 from pathlib import Path
+
+
+TEMPLATE_ID = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?", re.ASCII)
+SEMVER = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+    re.ASCII,
+)
 
 
 def inventory(root: Path) -> dict[str, tuple[int, str]]:
@@ -51,16 +61,29 @@ def main() -> None:
     if len(parts) != 4 or parts[0] != "archives" or not archive.endswith(".zip"):
         raise SystemExit(f"new file is outside the immutable archive layout: {archive}")
     template_id, release_version, filename = parts[1:]
+    if not TEMPLATE_ID.fullmatch(template_id):
+        raise SystemExit("templateId must be strict portable ASCII")
+    if not SEMVER.fullmatch(release_version):
+        raise SystemExit("releaseVersion must be strict SemVer 2.0 ASCII")
+    if any(ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F for character in archive):
+        raise SystemExit("archive path contains a control character")
+    if any(character in archive for character in ("'", '"', "`", "\r", "\n")):
+        raise SystemExit("archive path contains a shell or output delimiter")
     if filename != f"{template_id}-{release_version}.zip":
         raise SystemExit("archive filename does not match templateId and releaseVersion")
     if candidate[archive][0] > 100 * 1024 * 1024:
         raise SystemExit("archive exceeds 100 MiB")
 
     absolute = (args.candidate.resolve() / Path(*parts)).resolve()
-    print(absolute)
+    try:
+        absolute.relative_to(args.candidate.resolve())
+    except ValueError:
+        raise SystemExit("archive resolves outside the candidate tree") from None
+    workflow_path = f"candidate/{archive}"
+    print(workflow_path)
     if args.github_output:
         with args.github_output.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(f"archive={absolute.as_posix()}\n")
+            handle.write(f"archive={workflow_path}\n")
             handle.write(f"template_id={template_id}\n")
             handle.write(f"release_version={release_version}\n")
 

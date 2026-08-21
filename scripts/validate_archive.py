@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -34,12 +36,35 @@ SEMVER = re.compile(
 )
 RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$", re.I)
 PRIVATE_PATH = re.compile(
-    r"(?:\b[A-Za-z]:[\\/]|/(?:Users|home|mnt/[a-z]|private|var/folders)/|"
+    r"(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]+\\[^\\\s]+|"
+    r"(?:^|[\s\"'`(=])/(?:Users|home|mnt/[A-Za-z]|private|var|tmp|etc|opt|root|srv|Volumes|workspace|data)/|"
     r"(?:%APPDATA%|%LOCALAPPDATA%|\$HOME|\$XDG_(?:CONFIG|DATA)_HOME)[\\/])",
-    re.I,
+    re.I | re.M,
 )
 PROVIDER = "io.github.jarxunlai.scientific-figure-community"
 CC_BY = "CC-BY-4.0"
+FIXED_METADATA_FILES = {
+    "submission.json",
+    "licenses.json",
+    "render-receipt.json",
+    "inventory.jsonl",
+    "payload/template.json",
+}
+BINARY_MAGIC = (
+    b"%PDF-",
+    b"PK\x03\x04",
+    b"PK\x05\x06",
+    b"PK\x07\x08",
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+    b"MZ",
+    b"\x7fELF",
+    b"\x1f\x8b",
+    b"Rar!\x1a\x07",
+    b"7z\xbc\xaf'\x1c",
+)
 
 
 def fail(message: str) -> None:
@@ -63,6 +88,10 @@ def canonical_path(name: str) -> str:
     if normalized != name:
         fail(f"non-canonical ZIP path: {name!r}")
     return normalized
+
+
+def valid_template_id(value: str) -> bool:
+    return bool(ID.fullmatch(value)) and not RESERVED.fullmatch(value)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -159,16 +188,91 @@ def validate_private_text(staging: Path, observed: set[str]) -> None:
     text_extensions = {".json", ".jsonl", ".md", ".txt", ".r", ".py", ".jl", ".m", ".sh", ".csv", ".tsv", ".yml", ".yaml"}
     for name in observed:
         path = staging / Path(*name.split("/"))
-        if path.stat().st_size <= MAX_TEXT_SCAN and path.suffix.lower() in text_extensions:
+        extension = path.suffix.lower()
+        if extension not in text_extensions:
+            continue
+        size = path.stat().st_size
+        if size > MAX_TEXT_SCAN:
+            fail(f"public text asset exceeds the 4 MiB fully-scanned limit: {name}")
+        raw = path.read_bytes()
+        stripped = raw.lstrip(b" \t\r\n")
+        if any(stripped.startswith(magic) for magic in BINARY_MAGIC):
+            fail(f"public text asset contains disguised binary content: {name}")
+        if raw.startswith(b"\xef\xbb\xbf") or b"\x00" in raw:
+            fail(f"public text asset must be UTF-8 without BOM or NUL: {name}")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"public text asset is not valid UTF-8: {name}")
+        if not text.strip():
+            fail(f"public text asset must be non-empty: {name}")
+        if PRIVATE_PATH.search(text):
+            fail(f"possible absolute/private machine path leaked in {name}")
+        if extension == ".json":
             try:
-                text = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                fail(f"declared text asset is not valid UTF-8: {name}")
-            if PRIVATE_PATH.search(text):
-                fail(f"possible absolute/private machine path leaked in {name}")
+                json.loads(text)
+            except Exception as exc:
+                fail(f"public JSON asset is invalid: {name}: {exc}")
+        elif extension in {".csv", ".tsv"}:
+            try:
+                rows = list(csv.reader(io.StringIO(text, newline=""), delimiter="," if extension == ".csv" else "\t", strict=True))
+            except (csv.Error, UnicodeError) as exc:
+                fail(f"public delimited-text asset is invalid: {name}: {exc}")
+            if len(rows) < 2 or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
+                fail(f"public delimited-text asset requires a header, a data row, and a consistent column count: {name}")
 
 
-def validate_submission_contract(staging: Path, observed: set[str]) -> dict:
+def validate_declared_file_set(observed: set[str], declared: set[str]) -> None:
+    expected = FIXED_METADATA_FILES | declared
+    missing = sorted(expected - observed)
+    unexpected = sorted(observed - expected)
+    if missing or unexpected:
+        fail(f"archive file set differs from fixed metadata and declared assets: missing={missing}, unexpected={unexpected}")
+
+
+def build_isolated_render_root(staging: Path, render_root: Path, render_files: set[str]) -> None:
+    if render_root.exists():
+        fail("isolated render root must not exist")
+    try:
+        render_root.relative_to(staging)
+    except ValueError:
+        pass
+    else:
+        fail("isolated render root must be outside the extracted archive")
+    if "payload/code/render.R" not in render_files or not any(name.startswith("payload/data/") for name in render_files):
+        fail("isolated render root lacks the fixed entrypoint or synthetic input data")
+    for name in render_files:
+        canonical_path(name)
+        if not (name.startswith("payload/code/") or name.startswith("payload/data/")):
+            fail(f"isolated render root contains a non-render asset: {name}")
+
+    render_root.mkdir(parents=True)
+    for name in sorted(render_files):
+        source = staging / Path(*name.split("/"))
+        if not source.is_file() or source.is_symlink():
+            fail(f"isolated render input is not a regular extracted file: {name}")
+        target = render_root / Path(*name.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as input_handle, target.open("xb") as output_handle:
+            shutil.copyfileobj(input_handle, output_handle, length=1024 * 1024)
+
+
+def validate_expected_archive_identity(template_id: str, version: str, expected_template_id: str, expected_release_version: str) -> None:
+    if not valid_template_id(expected_template_id) or not SEMVER.fullmatch(expected_release_version):
+        fail("expected outer archive identity is invalid")
+    if template_id != expected_template_id or version != expected_release_version:
+        fail(
+            "outer archive path identity disagrees with submission/template identity: "
+            f"expected={expected_template_id}@{expected_release_version}, observed={template_id}@{version}"
+        )
+
+
+def validate_submission_contract(
+    staging: Path,
+    observed: set[str],
+    expected_template_id: str,
+    expected_release_version: str,
+) -> set[str]:
     submission = exact_keys(read_json(staging, "submission.json"), {
         "schema", "providerId", "templateId", "releaseVersion", "contentDigest",
         "parentLocalRelease", "assets", "rightsAttestation", "excludedPrivateState", "createdAt",
@@ -186,7 +290,7 @@ def validate_submission_contract(staging: Path, observed: set[str]) -> dict:
     template_id = submission["templateId"]
     version = submission["releaseVersion"]
     content_digest = submission["contentDigest"]
-    if not isinstance(template_id, str) or not ID.fullmatch(template_id):
+    if not isinstance(template_id, str) or not valid_template_id(template_id):
         fail("invalid templateId")
     if not isinstance(version, str) or not SEMVER.fullmatch(version):
         fail("invalid strict SemVer 2.0 releaseVersion")
@@ -194,6 +298,7 @@ def validate_submission_contract(staging: Path, observed: set[str]) -> dict:
         fail("invalid contentDigest")
     if template["templateId"] != template_id or template["releaseVersion"] != version or template["contentDigest"] != content_digest:
         fail("submission/template identity mismatch")
+    validate_expected_archive_identity(template_id, version, expected_template_id, expected_release_version)
     if template["codeExecutedBySflClient"] is not False:
         fail("template must state codeExecutedBySflClient=false")
 
@@ -282,9 +387,7 @@ def validate_submission_contract(staging: Path, observed: set[str]) -> dict:
         fail("submission lacks a required asset role or contains multiple generated previews")
     if flavor == "frozen_clean_room_seed" and (by_role["metadata"] != ["payload/template.json"] or by_role["render_code"] != ["payload/code/render.R"]):
         fail("seed must declare exactly the fixed metadata and render entrypoint")
-    for name in observed:
-        if name.startswith("payload/") and name != "payload/template.json" and name not in declared:
-            fail(f"submission contains an undeclared payload asset: {name}")
+    validate_declared_file_set(observed, set(declared))
     if flavor == "frozen_clean_room_seed":
         asset_licenses = licenses["assetLicenses"]
         if not isinstance(asset_licenses, dict) or set(asset_licenses) != set(declared) or any(asset_licenses[name] != declared[name]["license"] for name in declared):
@@ -380,7 +483,11 @@ def validate_submission_contract(staging: Path, observed: set[str]) -> dict:
         fail("public template six-field status is invalid")
     if computed_digest != content_digest:
         fail("contentDigest does not match the actual public assets and metadata")
-    return receipt
+    return set(code_paths) | set(input_paths)
+
+
+def canonical_order_key(value: str) -> bytes:
+    return value.encode("utf-16-be")
 
 
 def validate_zip_structure(archive: Path) -> None:
@@ -391,17 +498,80 @@ def validate_zip_structure(archive: Path) -> None:
     if eocd < 0 or eocd + 22 > len(data):
         fail("archive has no valid ZIP end record")
     disk, central_disk, disk_entries, total_entries, central_size, central_offset, comment_length = struct.unpack_from("<HHHHIIH", data, eocd + 4)
-    if disk != 0 or central_disk != 0 or disk_entries != total_entries:
+    if disk != 0 or central_disk != 0 or disk_entries != total_entries or total_entries == 0:
         fail("multi-disk ZIP archives are forbidden")
     if total_entries == 0xFFFF or central_size == 0xFFFFFFFF or central_offset == 0xFFFFFFFF:
         fail("ZIP64 archives are forbidden")
-    if eocd + 22 + comment_length != len(data):
-        fail("archive contains trailing bytes after the ZIP end record")
+    if comment_length != 0 or eocd + 22 != len(data):
+        fail("ZIP global comments and trailing bytes are forbidden")
     if central_offset + central_size != eocd:
         fail("ZIP central directory has a gap, overlap, or hidden payload")
 
+    cursor = central_offset
+    expected_local_offset = 0
+    names: list[str] = []
+    for _ in range(total_entries):
+        if cursor + 46 > eocd or data[cursor:cursor + 4] != b"PK\x01\x02":
+            fail("ZIP central directory entry is invalid")
+        made_by, needed, flags, method, dos_time, dos_date, crc, compressed_size, expanded_size, name_length, extra_length, entry_comment_length, starting_disk, internal_attr, external_attr, local_offset = struct.unpack_from(
+            "<HHHHHHIIIHHHHHII", data, cursor + 4
+        )
+        central_end = cursor + 46 + name_length + extra_length + entry_comment_length
+        if central_end > eocd:
+            fail("ZIP central directory entry exceeds its declared bounds")
+        raw_name = data[cursor + 46:cursor + 46 + name_length]
+        try:
+            name = raw_name.decode("utf-8")
+        except UnicodeDecodeError:
+            fail("ZIP entry name is not valid UTF-8")
+        if name.encode("utf-8") != raw_name:
+            fail("ZIP entry name is not canonical UTF-8")
+        canonical_path(name)
+        if name.endswith("/"):
+            fail("ZIP directory entries are forbidden")
+        expected_flags = 0x0800 if any(byte >= 0x80 for byte in raw_name) else 0
+        if (
+            made_by != 20 or needed != 20 or flags != expected_flags or method != zipfile.ZIP_DEFLATED or
+            dos_time != 0x4000 or dos_date != 0x0021 or extra_length != 0 or entry_comment_length != 0 or
+            starting_disk != 0 or internal_attr != 0 or external_attr != 0
+        ):
+            fail(f"ZIP entry metadata is outside the deterministic publication dialect: {name}")
+        if local_offset != expected_local_offset or local_offset + 30 > central_offset or data[local_offset:local_offset + 4] != b"PK\x03\x04":
+            fail("ZIP local records must be contiguous and follow canonical central order")
+        local_needed, local_flags, local_method, local_time, local_date, local_crc, local_compressed, local_expanded, local_name_length, local_extra_length = struct.unpack_from(
+            "<HHHHHIIIHH", data, local_offset + 4
+        )
+        local_name_start = local_offset + 30
+        local_name = data[local_name_start:local_name_start + local_name_length]
+        data_start = local_name_start + local_name_length + local_extra_length
+        data_end = data_start + compressed_size
+        if (
+            local_needed != needed or local_flags != flags or local_method != method or
+            local_time != dos_time or local_date != dos_date or local_crc != crc or
+            local_compressed != compressed_size or local_expanded != expanded_size or
+            local_name_length != name_length or local_extra_length != 0 or local_name != raw_name or
+            data_end > central_offset
+        ):
+            fail(f"ZIP local and central identities disagree: {name}")
+        names.append(name)
+        expected_local_offset = data_end
+        cursor = central_end
 
-def extract_and_validate(archive: Path, staging: Path) -> None:
+    if cursor != eocd or cursor != central_offset + central_size:
+        fail("ZIP central directory size or entry count is inconsistent")
+    if expected_local_offset != central_offset:
+        fail("ZIP local records contain a gap or hidden payload before the central directory")
+    if names != sorted(names, key=canonical_order_key) or len(names) != len(set(names)):
+        fail("ZIP entries must be unique and canonically ordered")
+
+
+def extract_and_validate(
+    archive: Path,
+    staging: Path,
+    render_root: Path,
+    expected_template_id: str,
+    expected_release_version: str,
+) -> None:
     if not archive.is_file() or archive.is_symlink():
         fail("archive must be a regular file")
     if archive.stat().st_size > MAX_ARCHIVE:
@@ -462,7 +632,8 @@ def extract_and_validate(archive: Path, staging: Path) -> None:
 
     validate_inventory(staging, observed)
     validate_private_text(staging, observed)
-    validate_submission_contract(staging, observed)
+    render_files = validate_submission_contract(staging, observed, expected_template_id, expected_release_version)
+    build_isolated_render_root(staging, render_root, render_files)
 
 
 def paeth(a: int, b: int, c: int) -> int:
@@ -479,28 +650,57 @@ def decode_png_rgba(data: bytes) -> tuple[int, int, bytes]:
     idat = bytearray()
     palette = None
     transparency = None
-    saw_iend = False
-    while offset + 12 <= len(data):
+    chunks: list[bytes] = []
+    while offset < len(data):
+        if offset + 12 > len(data):
+            fail("PNG contains a truncated chunk header")
         length = struct.unpack(">I", data[offset:offset + 4])[0]
         kind = data[offset + 4:offset + 8]
+        if offset + 12 + length > len(data):
+            fail("PNG chunk exceeds the file bounds")
         payload = data[offset + 8:offset + 8 + length]
         crc = struct.unpack(">I", data[offset + 8 + length:offset + 12 + length])[0]
         if len(payload) != length or (binascii.crc32(kind + payload) & 0xFFFFFFFF) != crc:
             fail("PNG chunk length/CRC is invalid")
         offset += 12 + length
-        if kind == b"IHDR": ihdr = payload
-        elif kind == b"IDAT": idat.extend(payload)
-        elif kind == b"PLTE": palette = payload
-        elif kind == b"tRNS": transparency = payload
-        elif kind == b"IEND": saw_iend = True; break
-    if ihdr is None or len(ihdr) != 13 or not saw_iend:
-        fail("PNG is missing IHDR/IEND")
+        if kind not in {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"}:
+            fail(f"PNG chunk {kind!r} is outside the metadata-free publication dialect")
+        chunks.append(kind)
+        if kind == b"IHDR":
+            if ihdr is not None or len(chunks) != 1 or length != 13:
+                fail("PNG must contain one 13-byte IHDR as its first chunk")
+            ihdr = payload
+        elif kind == b"PLTE":
+            if palette is not None or ihdr is None or idat:
+                fail("PNG PLTE order or singleton contract is invalid")
+            palette = payload
+        elif kind == b"tRNS":
+            if transparency is not None or ihdr is None or palette is None or idat:
+                fail("PNG tRNS order or singleton contract is invalid")
+            transparency = payload
+        elif kind == b"IDAT":
+            if ihdr is None or idat or not payload:
+                fail("PNG must contain exactly one non-empty IDAT chunk")
+            idat.extend(payload)
+        elif kind == b"IEND":
+            if length != 0 or not idat or offset != len(data):
+                fail("PNG must end with one empty IEND and no trailing bytes")
+            break
+    if ihdr is None or chunks.count(b"IEND") != 1 or chunks[-1:] != [b"IEND"]:
+        fail("PNG is missing its unique terminal IEND")
     width, height, depth, color_type, compression, filtering, interlace = struct.unpack(">IIBBBBB", ihdr)
     if depth != 8 or compression != 0 or filtering != 0 or interlace != 0 or width < 1 or height < 1 or width > 16384 or height > 16384:
         fail("PNG uses unsupported or unsafe encoding")
     channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
     if channels is None:
         fail("PNG color type is unsupported")
+    if color_type == 3:
+        if palette is None or not 3 <= len(palette) <= 768 or len(palette) % 3 != 0:
+            fail("indexed PNG requires one valid PLTE")
+        if transparency is not None and (not transparency or len(transparency) > len(palette) // 3):
+            fail("indexed PNG tRNS is invalid")
+    elif palette is not None or transparency is not None:
+        fail("non-indexed PNG may not carry PLTE or tRNS in the canonical dialect")
     if width * height * 4 > 128 * 1024 * 1024:
         fail("PNG canonical RGBA payload exceeds 128 MiB")
     stride = width * channels
@@ -551,6 +751,13 @@ def decode_png_rgba(data: bytes) -> tuple[int, int, bytes]:
 
 def post_render(staging: Path, rendered: Path) -> None:
     receipt = read_json(staging, "render-receipt.json")
+    expected_bytes = receipt.get("previewBytes")
+    if not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool) or expected_bytes < 1 or expected_bytes > MAX_FILE:
+        fail("render receipt has an invalid bounded previewBytes")
+    if not rendered.is_file() or rendered.is_symlink():
+        fail("sandbox render output must be a regular non-symlink file")
+    if rendered.stat().st_size != expected_bytes:
+        fail("sandbox render output byte length differs from the archived preview receipt")
     actual = rendered.read_bytes()
     width, height, rgba = decode_png_rgba(actual)
     if width != receipt.get("width") or height != receipt.get("height"):
@@ -566,13 +773,26 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--staging", type=Path, required=True)
+    parser.add_argument("--render-root", type=Path)
     parser.add_argument("--rendered", type=Path)
+    parser.add_argument("--expected-template-id")
+    parser.add_argument("--expected-release-version")
     args = parser.parse_args()
     staging = args.staging.resolve()
     if args.archive:
-        extract_and_validate(args.archive.resolve(), staging)
+        if not args.render_root or not args.expected_template_id or not args.expected_release_version:
+            fail("archive validation requires an isolated render root and expected outer templateId/releaseVersion")
+        extract_and_validate(
+            args.archive.resolve(),
+            staging,
+            args.render_root.resolve(),
+            args.expected_template_id,
+            args.expected_release_version,
+        )
         print(f"validated and extracted {args.archive}")
     elif args.rendered:
+        if args.render_root or args.expected_template_id or args.expected_release_version:
+            fail("render verification does not accept a render root or outer archive identity")
         post_render(staging, args.rendered.resolve())
     else:
         fail("choose --archive or --rendered")

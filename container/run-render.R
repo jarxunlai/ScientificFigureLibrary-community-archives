@@ -27,8 +27,8 @@ status <- system2(
     "--input-dir", input_dir,
     "--output", output_png
   ),
-  stdout = file.path(output_dir, "render.stdout.txt"),
-  stderr = file.path(output_dir, "render.stderr.txt"),
+  stdout = "/dev/null",
+  stderr = "/dev/null",
   wait = TRUE,
   timeout = 150
 )
@@ -38,6 +38,9 @@ if (!identical(status, 0L)) {
 if (!file.exists(output_png) || file.info(output_png)$size <= 0) {
   stop("render entrypoint did not create a PNG", call. = FALSE)
 }
+if (file.info(output_png)$size > 64 * 1024 * 1024) {
+  stop("render output exceeds 64 MiB", call. = FALSE)
+}
 
 signature <- readBin(output_png, what = "raw", n = 8L)
 expected <- as.raw(c(137, 80, 78, 71, 13, 10, 26, 10))
@@ -45,12 +48,14 @@ if (!identical(signature, expected)) {
   stop("render output is not a PNG", call. = FALSE)
 }
 
-writeLines(
-  c(
-    paste0("R=", R.version.string),
-    paste0("platform=", R.version$platform),
-    paste0("outputBytes=", file.info(output_png)$size)
-  ),
-  file.path(output_dir, "runtime.txt"),
-  useBytes = TRUE
-)
+input <- file(output_png, open = "rb")
+output <- file("/dev/stdout", open = "wb")
+on.exit(close(input), add = TRUE)
+on.exit(close(output), add = TRUE)
+repeat {
+  block <- readBin(input, what = "raw", n = 1024L * 1024L)
+  if (!length(block)) break
+  writeBin(block, output, useBytes = TRUE)
+}
+flush(output)
+message(paste0("R=", R.version.string, "; platform=", R.version$platform, "; outputBytes=", file.info(output_png)$size))

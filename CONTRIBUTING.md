@@ -34,3 +34,13 @@ render-receipt.json
 ```
 
 CI runs this entrypoint as a non-root user with no network, a read-only root filesystem, no Linux capabilities, `no-new-privileges`, bounded CPU/memory/PIDs/files, a timeout, read-only submission mount, and only a temporary output mount writable. The client never executes this code when materializing a template.
+## Human visual and rights review remains mandatory
+
+CI verifies the committed tree, archive structure and identity, declared asset
+inventory, rights-attestation fields, isolated re-render, PNG dimensions, and
+the byte-exact and canonical-RGBA digests. Those mechanical checks do **not**
+prove that a preview is free of watermarks, third-party visual material, or
+misstated semantic copyright ownership. A maintainer must inspect the preview,
+code, synthetic data, documentation, provenance, and license claims before
+manually merging an Archive PR. A green CI run is evidence for that review, not
+an automated copyright clearance.

@@ -36,13 +36,18 @@ jobs:
         shell: bash
         env:
           ARCHIVE_PATH: ${{ steps.policy.outputs.archive }}
+          EXPECTED_TEMPLATE_ID: ${{ steps.policy.outputs.template_id }}
+          EXPECTED_RELEASE_VERSION: ${{ steps.policy.outputs.release_version }}
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/sfl-archive-validation"
           rm -rf "$work"
           python3 trusted/scripts/validate_archive.py \
             --archive "$ARCHIVE_PATH" \
-            --staging "$work/submission"
+            --staging "$work/submission" \
+            --render-root "$work/render-root" \
+            --expected-template-id "$EXPECTED_TEMPLATE_ID" \
+            --expected-release-version "$EXPECTED_RELEASE_VERSION"
       - name: Build reviewed fixed-R renderer
         shell: bash
         run: |
@@ -76,10 +81,11 @@ jobs:
             --pids-limit 128 \
             --ulimit nofile=1024:1024 \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456 \
-            --mount "type=bind,src=$work/submission,dst=/submission,readonly" \
-            --mount "type=bind,src=$work/output,dst=/output" \
+            --tmpfs /output:rw,noexec,nosuid,nodev,size=134217728,mode=1777 \
+            --mount "type=bind,src=$work/render-root,dst=/submission,readonly" \
             sfl-archive-renderer:r-4.4.3-v1 \
-            /submission /output
+            /submission /output \
+            > "$work/output/preview.png"
       - name: Verify rendered PNG identity and canonical RGBA digest
         shell: bash
         run: |

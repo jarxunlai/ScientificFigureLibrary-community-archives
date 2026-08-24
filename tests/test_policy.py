@@ -105,6 +105,116 @@ class PolicyTests(unittest.TestCase):
         base = {"README.md": compare.TreeEntry("100644", "blob", "1" * 40)}
         candidate = {**base, archive_path: compare.TreeEntry("100644", "blob", "2" * 40)}
         self.assertEqual(compare.validate_archive_tree_change(base, candidate), archive_path)
+        decision = compare.validate_archive_tree_policy(base, candidate)
+        self.assertEqual(decision.mode, "add")
+        self.assertEqual(decision.archive, archive_path)
+
+    @staticmethod
+    def invalid_seed_withdrawal_trees() -> tuple[dict[str, object], dict[str, object]]:
+        base: dict[str, object] = {
+            "README.md": compare.TreeEntry("100644", "blob", "1" * 40),
+            ".github/workflows/validate-archive-pr.yml": compare.TreeEntry("100644", "blob", "2" * 40),
+            "scripts/compare_pr_trees.py": compare.TreeEntry("100644", "blob", "3" * 40),
+            "schemas/public-template-archive.v1.schema.json": compare.TreeEntry("100644", "blob", "4" * 40),
+        }
+        base.update({
+            path: compare.TreeEntry("100644", "blob", oid)
+            for path, oid in compare.EXACT_INVALID_SEED_WITHDRAWAL.items()
+        })
+        candidate = {
+            path: entry
+            for path, entry in base.items()
+            if path not in compare.EXACT_INVALID_SEED_WITHDRAWAL
+        }
+        return base, candidate
+
+    def test_exact_three_invalid_seed_withdrawal_is_atomic_and_oid_bound(self) -> None:
+        base, candidate = self.invalid_seed_withdrawal_trees()
+        decision = compare.validate_archive_tree_policy(base, candidate)
+        self.assertEqual(decision.mode, "withdrawal")
+        self.assertIsNone(decision.archive)
+        self.assertEqual(decision.withdrawn, tuple(sorted(compare.EXACT_INVALID_SEED_WITHDRAWAL)))
+
+    def test_invalid_seed_withdrawal_rejects_partial_extra_or_wrong_path_deletion(self) -> None:
+        base, exact_candidate = self.invalid_seed_withdrawal_trees()
+        paths = sorted(compare.EXACT_INVALID_SEED_WITHDRAWAL)
+        cases = {
+            "partial": {**exact_candidate, paths[0]: base[paths[0]]},
+            "extra": {path: entry for path, entry in exact_candidate.items() if path != "README.md"},
+            "case drift": {
+                **exact_candidate,
+                paths[0].upper(): base[paths[0]],
+            },
+        }
+        for label, candidate in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "atomically delete only the three exact"):
+                compare.validate_archive_tree_policy(base, candidate)
+
+    def test_invalid_seed_withdrawal_rejects_any_addition_modification_or_policy_drift(self) -> None:
+        base, exact_candidate = self.invalid_seed_withdrawal_trees()
+        cases = {
+            "addition": {
+                **exact_candidate,
+                "archives/other/1.0.0/other-1.0.0.zip": compare.TreeEntry("100644", "blob", "5" * 40),
+            },
+            "ordinary modification": {
+                **exact_candidate,
+                "README.md": compare.TreeEntry("100644", "blob", "6" * 40),
+            },
+            "workflow drift": {
+                **exact_candidate,
+                ".github/workflows/validate-archive-pr.yml": compare.TreeEntry("100644", "blob", "7" * 40),
+            },
+            "schema drift": {
+                **exact_candidate,
+                "schemas/public-template-archive.v1.schema.json": compare.TreeEntry("100644", "blob", "8" * 40),
+            },
+            "policy drift": {
+                **exact_candidate,
+                "scripts/compare_pr_trees.py": compare.TreeEntry("100644", "blob", "9" * 40),
+            },
+        }
+        for label, candidate in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "atomically delete only the three exact"):
+                compare.validate_archive_tree_policy(base, candidate)
+
+    def test_invalid_seed_withdrawal_rejects_base_blob_oid_drift(self) -> None:
+        base, candidate = self.invalid_seed_withdrawal_trees()
+        path = sorted(compare.EXACT_INVALID_SEED_WITHDRAWAL)[0]
+        base[path] = compare.TreeEntry("100644", "blob", "a" * 40)
+        with self.assertRaisesRegex(SystemExit, "base blob identity mismatch"):
+            compare.validate_archive_tree_policy(base, candidate)
+
+    def test_withdrawn_invalid_seed_identity_cannot_be_readded(self) -> None:
+        base = {"README.md": compare.TreeEntry("100644", "blob", "1" * 40)}
+        for path, oid in compare.EXACT_INVALID_SEED_WITHDRAWAL.items():
+            with self.subTest(path=path):
+                candidate = {**base, path: compare.TreeEntry("100644", "blob", oid)}
+                with self.assertRaisesRegex(SystemExit, "identity is retired"):
+                    compare.validate_archive_tree_policy(base, candidate)
+
+    def test_invalid_seed_withdrawal_rejects_mode_or_symlink_drift(self) -> None:
+        base, exact_candidate = self.invalid_seed_withdrawal_trees()
+        cases = {
+            "executable": {
+                **exact_candidate,
+                "README.md": compare.TreeEntry("100755", "blob", "1" * 40),
+            },
+            "symlink": {
+                **exact_candidate,
+                "README.md": compare.TreeEntry("120000", "blob", "1" * 40),
+            },
+        }
+        for label, candidate in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "non-100644"):
+                compare.validate_archive_tree_policy(base, candidate)
+
+    def test_workflow_renders_additions_and_never_renders_withdrawals(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "validate-archive-pr.yml").read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("if: steps.policy.outputs.mode == 'add'"), 4)
+        self.assertEqual(workflow.count("if: steps.policy.outputs.mode == 'withdrawal'"), 1)
+        self.assertIn("python3 trusted/scripts/compare_pr_trees.py", workflow)
+        self.assertIn("Archive extraction and rendering are intentionally skipped", workflow)
 
     def test_committed_tree_rejects_gitlink_even_with_one_zip(self) -> None:
         archive_path = "archives/example-template/1.0.0/example-template-1.0.0.zip"

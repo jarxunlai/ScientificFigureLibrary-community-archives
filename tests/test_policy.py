@@ -224,6 +224,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(lock["renderers"][language]["baseImage"], runtime_image)
             self.assertIsNone(lock["renderers"][language]["publishedImageDigest"])
             dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
+            self.assertNotIn("# syntax=", dockerfile)
             self.assertIn(artifact_lock["builderImage"], dockerfile)
             self.assertIn(runtime_image, dockerfile)
             self.assertIn("pixi install --frozen --platform linux-64", dockerfile)

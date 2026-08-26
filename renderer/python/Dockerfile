@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Bootstrap only. This context is not accepted by the Archive PR validator.
 ARG PIXI_IMAGE=ghcr.io/prefix-dev/pixi@sha256:ad4daaf2f85798f3f88d0489a3b4a7e92c33358709560fb5adf83242803cccbe
 ARG RUNTIME_IMAGE=docker.io/library/debian@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867

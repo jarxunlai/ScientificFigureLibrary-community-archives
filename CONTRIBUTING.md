@@ -10,27 +10,12 @@ archives/<templateId>/<releaseVersion>/<templateId>-<releaseVersion>.zip
 
 It may not modify or delete an existing path, workflow, validator, container, schema, policy, or license. Policy changes require a separate maintainer-authored PR.
 
-## Restricted invalid-seed withdrawal
+## No physical archive withdrawal
 
-The trusted validator has one closed maintenance exception for atomically
-withdrawing these exact releases:
-
-```text
-archives/ggsankeyfier-layout-color-combo/1.0.0/ggsankeyfier-layout-color-combo-1.0.0.zip
-archives/single-cell-enrichment-bar-pathway-genes/1.0.0/single-cell-enrichment-bar-pathway-genes-1.0.0.zip
-archives/umap-unchull-main-type-circles/1.0.0/umap-unchull-main-type-circles-1.0.0.zip
-```
-
-All three paths must disappear in one candidate commit, their base blob OIDs
-must match the validator's reviewed allowlist, and no other path may be added,
-modified, or deleted. The exception cannot withdraw a different version or
-template and cannot be used for a partial removal. Because a withdrawal has no
-candidate archive to extract, its CI mode performs only the exact trusted-tree
-and OID validation; normal archive additions continue through full extraction
-and fixed-R re-rendering. After withdrawal, the three exact identities are
-retired and the normal add gate will reject attempts to restore those paths. A
-maintainer must review and manually merge the withdrawal. The commits and blobs
-remain in Git history for audit.
+Archive paths are append-only without exceptions. Once committed, neither the
+ZIP nor any other base-tree blob may be modified or deleted by an Archive
+submission. Community withdrawal and redaction are Catalog lifecycle actions;
+they do not remove an immutable ZIP from this repository.
 
 ## Publication content
 
@@ -56,6 +41,32 @@ render-receipt.json
 ```
 
 CI runs this entrypoint as a non-root user with no network, a read-only root filesystem, no Linux capabilities, `no-new-privileges`, bounded CPU/memory/PIDs/files, a timeout, read-only submission mount, and only a temporary output mount writable. The client never executes this code when materializing a template.
+
+## Future 0.7 renderer bootstrap
+
+The `renderer/` directory contains two auditable, disabled-for-intake build
+contexts for future R-entry and Python-entry submissions. Both contexts are
+intended to contain the fixed R and Python runtimes, but each runner permits
+only its own trusted entrypoint. `renderer/pixi.lock` pins the shared Linux
+environment to 222 exact conda-forge artifact URLs and SHA-256 values.
+`renderer/renderer-lock.json` records the package contract and digest-pinned
+build/final OCI foundations. Bootstrap publication is explicitly enabled only
+for trusted `main`, while `trustedLinuxBuildVerified=false`,
+`v2IntakeEnabled=false`, and null source-pinned image digests remain fail closed
+until the resulting evidence is reviewed.
+
+Only `.github/workflows/publish-renderer-bootstrap.yml`, running from trusted
+`main`, may request `packages: write`. It builds, verifies exact non-root image
+configuration and hardened runtime behavior, inventories every committed
+rootfs tree including `/run` and `/tmp`, and pushes the same image instance.
+It then verifies the raw single-image manifest/config binding and requires an
+anonymous exact-digest inspect and pull after logout before recording the real
+GHCR digest. A private first-publish package fails this gate until its owner
+deliberately changes its visibility to public. It never writes an unknown or
+placeholder digest into the repository. Archive
+pull-request validation remains on the v1 fixed-R container until a later
+reviewed policy change pins those digests and enables v2 intake.
+
 ## Human visual and rights review remains mandatory
 
 CI verifies the committed tree, archive structure and identity, declared asset

@@ -7,6 +7,7 @@ import json
 import struct
 import sys
 import tempfile
+import tomllib
 import unittest
 import zipfile
 import zlib
@@ -105,116 +106,180 @@ class PolicyTests(unittest.TestCase):
         base = {"README.md": compare.TreeEntry("100644", "blob", "1" * 40)}
         candidate = {**base, archive_path: compare.TreeEntry("100644", "blob", "2" * 40)}
         self.assertEqual(compare.validate_archive_tree_change(base, candidate), archive_path)
-        decision = compare.validate_archive_tree_policy(base, candidate)
-        self.assertEqual(decision.mode, "add")
-        self.assertEqual(decision.archive, archive_path)
 
-    @staticmethod
-    def invalid_seed_withdrawal_trees() -> tuple[dict[str, object], dict[str, object]]:
-        base: dict[str, object] = {
+    def test_archive_policy_is_strictly_append_only_without_deletion_exceptions(self) -> None:
+        old_exact_three = (
+            "archives/ggsankeyfier-layout-color-combo/1.0.0/ggsankeyfier-layout-color-combo-1.0.0.zip",
+            "archives/single-cell-enrichment-bar-pathway-genes/1.0.0/single-cell-enrichment-bar-pathway-genes-1.0.0.zip",
+            "archives/umap-unchull-main-type-circles/1.0.0/umap-unchull-main-type-circles-1.0.0.zip",
+        )
+        base = {"README.md": compare.TreeEntry("100644", "blob", "1" * 40)}
+        base.update(
+            {
+                path: compare.TreeEntry("100644", "blob", str(index) * 40)
+                for index, path in enumerate(old_exact_three, start=2)
+            }
+        )
+        candidate = {path: entry for path, entry in base.items() if path not in old_exact_three}
+
+        self.assertFalse(hasattr(compare, "EXACT_INVALID_SEED_WITHDRAWAL"))
+        with self.assertRaisesRegex(SystemExit, "preserve every existing path"):
+            compare.validate_archive_tree_change(base, candidate)
+
+    def test_append_only_policy_rejects_any_modification_deletion_or_multiple_additions(self) -> None:
+        base = {
             "README.md": compare.TreeEntry("100644", "blob", "1" * 40),
-            ".github/workflows/validate-archive-pr.yml": compare.TreeEntry("100644", "blob", "2" * 40),
-            "scripts/compare_pr_trees.py": compare.TreeEntry("100644", "blob", "3" * 40),
-            "schemas/public-template-archive.v1.schema.json": compare.TreeEntry("100644", "blob", "4" * 40),
+            "archives/existing/1.0.0/existing-1.0.0.zip": compare.TreeEntry("100644", "blob", "2" * 40),
         }
-        base.update({
-            path: compare.TreeEntry("100644", "blob", oid)
-            for path, oid in compare.EXACT_INVALID_SEED_WITHDRAWAL.items()
-        })
-        candidate = {
-            path: entry
-            for path, entry in base.items()
-            if path not in compare.EXACT_INVALID_SEED_WITHDRAWAL
-        }
-        return base, candidate
-
-    def test_exact_three_invalid_seed_withdrawal_is_atomic_and_oid_bound(self) -> None:
-        base, candidate = self.invalid_seed_withdrawal_trees()
-        decision = compare.validate_archive_tree_policy(base, candidate)
-        self.assertEqual(decision.mode, "withdrawal")
-        self.assertIsNone(decision.archive)
-        self.assertEqual(decision.withdrawn, tuple(sorted(compare.EXACT_INVALID_SEED_WITHDRAWAL)))
-
-    def test_invalid_seed_withdrawal_rejects_partial_extra_or_wrong_path_deletion(self) -> None:
-        base, exact_candidate = self.invalid_seed_withdrawal_trees()
-        paths = sorted(compare.EXACT_INVALID_SEED_WITHDRAWAL)
+        new_path = "archives/new/1.0.0/new-1.0.0.zip"
         cases = {
-            "partial": {**exact_candidate, paths[0]: base[paths[0]]},
-            "extra": {path: entry for path, entry in exact_candidate.items() if path != "README.md"},
-            "case drift": {
-                **exact_candidate,
-                paths[0].upper(): base[paths[0]],
-            },
-        }
-        for label, candidate in cases.items():
-            with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "atomically delete only the three exact"):
-                compare.validate_archive_tree_policy(base, candidate)
-
-    def test_invalid_seed_withdrawal_rejects_any_addition_modification_or_policy_drift(self) -> None:
-        base, exact_candidate = self.invalid_seed_withdrawal_trees()
-        cases = {
-            "addition": {
-                **exact_candidate,
+            "delete": {"README.md": base["README.md"]},
+            "modify": {**base, "README.md": compare.TreeEntry("100644", "blob", "3" * 40)},
+            "two additions": {
+                **base,
+                new_path: compare.TreeEntry("100644", "blob", "4" * 40),
                 "archives/other/1.0.0/other-1.0.0.zip": compare.TreeEntry("100644", "blob", "5" * 40),
             },
-            "ordinary modification": {
-                **exact_candidate,
-                "README.md": compare.TreeEntry("100644", "blob", "6" * 40),
-            },
-            "workflow drift": {
-                **exact_candidate,
-                ".github/workflows/validate-archive-pr.yml": compare.TreeEntry("100644", "blob", "7" * 40),
-            },
-            "schema drift": {
-                **exact_candidate,
-                "schemas/public-template-archive.v1.schema.json": compare.TreeEntry("100644", "blob", "8" * 40),
-            },
-            "policy drift": {
-                **exact_candidate,
-                "scripts/compare_pr_trees.py": compare.TreeEntry("100644", "blob", "9" * 40),
-            },
         }
         for label, candidate in cases.items():
-            with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "atomically delete only the three exact"):
-                compare.validate_archive_tree_policy(base, candidate)
+            with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "preserve every existing path"):
+                compare.validate_archive_tree_change(base, candidate)
 
-    def test_invalid_seed_withdrawal_rejects_base_blob_oid_drift(self) -> None:
-        base, candidate = self.invalid_seed_withdrawal_trees()
-        path = sorted(compare.EXACT_INVALID_SEED_WITHDRAWAL)[0]
-        base[path] = compare.TreeEntry("100644", "blob", "a" * 40)
-        with self.assertRaisesRegex(SystemExit, "base blob identity mismatch"):
-            compare.validate_archive_tree_policy(base, candidate)
-
-    def test_withdrawn_invalid_seed_identity_cannot_be_readded(self) -> None:
-        base = {"README.md": compare.TreeEntry("100644", "blob", "1" * 40)}
-        for path, oid in compare.EXACT_INVALID_SEED_WITHDRAWAL.items():
-            with self.subTest(path=path):
-                candidate = {**base, path: compare.TreeEntry("100644", "blob", oid)}
-                with self.assertRaisesRegex(SystemExit, "identity is retired"):
-                    compare.validate_archive_tree_policy(base, candidate)
-
-    def test_invalid_seed_withdrawal_rejects_mode_or_symlink_drift(self) -> None:
-        base, exact_candidate = self.invalid_seed_withdrawal_trees()
-        cases = {
-            "executable": {
-                **exact_candidate,
-                "README.md": compare.TreeEntry("100755", "blob", "1" * 40),
-            },
-            "symlink": {
-                **exact_candidate,
-                "README.md": compare.TreeEntry("120000", "blob", "1" * 40),
-            },
-        }
-        for label, candidate in cases.items():
-            with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "non-100644"):
-                compare.validate_archive_tree_policy(base, candidate)
-
-    def test_workflow_renders_additions_and_never_renders_withdrawals(self) -> None:
+    def test_pr_workflow_runs_trusted_unit_tests_and_has_no_withdrawal_route(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "validate-archive-pr.yml").read_text(encoding="utf-8")
-        self.assertEqual(workflow.count("if: steps.policy.outputs.mode == 'add'"), 4)
-        self.assertEqual(workflow.count("if: steps.policy.outputs.mode == 'withdrawal'"), 1)
+        self.assertIn("name: sfl-community-archive-policy-v1", workflow)
+        self.assertIn("python3 -m unittest discover --start-directory trusted/tests --pattern 'test_*.py'", workflow)
         self.assertIn("python3 trusted/scripts/compare_pr_trees.py", workflow)
-        self.assertIn("Archive extraction and rendering are intentionally skipped", workflow)
+        self.assertNotIn("steps.policy.outputs.mode", workflow)
+        self.assertNotIn("withdrawal", workflow.lower())
+
+    def test_renderer_publish_workflow_is_trusted_main_only(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "publish-renderer-bootstrap.yml").read_text(encoding="utf-8")
+        self.assertIn("branches: [main]", workflow)
+        self.assertIn("github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("packages: write", workflow)
+        self.assertEqual(workflow.count("packages: write"), 1)
+        self.assertIn("needs.inspect-lock.outputs.publish_bootstrap_images == 'true'", workflow)
+        self.assertIn("concurrency:", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertEqual(workflow.count("timeout-minutes:"), 2)
+        self.assertNotIn("pull_request:", workflow)
+        self.assertNotIn("pull_request_target:", workflow)
+        self.assertNotIn("packages: write", (ROOT / ".github" / "workflows" / "validate-archive-pr.yml").read_text(encoding="utf-8"))
+        self.assertIn("v2_intake_enabled=false", workflow)
+        self.assertEqual(workflow.count("docker build --pull --platform linux/amd64"), 1)
+        self.assertIn("scripts/audit_renderer_rootfs.py rootfs.tar", workflow)
+        self.assertIn("scripts/verify_renderer_oci.py image-config", workflow)
+        self.assertIn("scripts/verify_renderer_oci.py registry-manifest", workflow)
+        self.assertIn("bootstrap runner returned unexpected disabled-intake status", workflow)
+        self.assertIn("--user 65532:65532", workflow)
+        self.assertIn("--workdir /nonexistent", workflow)
+        self.assertIn("docker buildx imagetools inspect --raw", workflow)
+        self.assertIn("--expected-config-digest \"$EXPECTED_IMAGE_ID\"", workflow)
+        self.assertIn("docker logout ghcr.io", workflow)
+        self.assertIn("anonymous_config=", workflow)
+        self.assertIn("unset DOCKER_AUTH_CONFIG REGISTRY_AUTH_FILE", workflow)
+        self.assertIn("docker pull --platform linux/amd64 \"$remote\"", workflow)
+        self.assertIn("--expected-repo-digest \"$remote\"", workflow)
+        self.assertIn("Push the exact locally audited image", workflow)
+        self.assertLess(workflow.index("Audit the exact image rootfs"), workflow.index("Authenticate to GHCR"))
+        self.assertLess(workflow.index("Authenticate to GHCR"), workflow.index("docker push"))
+        self.assertGreaterEqual(workflow.count("EXPECTED_IMAGE_ID"), 2)
+
+    def test_dual_renderer_bootstrap_contexts_and_lock_contract_are_auditable(self) -> None:
+        lock = json.loads((ROOT / "renderer" / "renderer-lock.json").read_text(encoding="utf-8"))
+        self.assertEqual(lock["schema"], "figure-library.archive-renderer-lock.v1")
+        self.assertNotIn("publishReady", lock)
+        self.assertEqual(lock["bootstrapPublicationMode"], "trusted_main_build_audit_push_same_image")
+        self.assertTrue(lock["publishBootstrapImages"])
+        self.assertFalse(lock["v2IntakeEnabled"])
+        self.assertFalse(lock["trustedLinuxBuildVerified"])
+        self.assertEqual(lock["rootfsAudit"], {
+            "schema": "figure-library.archive-renderer-rootfs-inventory.v1",
+            "script": "scripts/audit_renderer_rootfs.py",
+            "requiresExactPushedImage": True,
+            "forbidsToolAliasesAndHardlinks": True,
+            "scansCommittedRunAndTmp": True,
+            "forbidsShellShebangExecutables": True,
+        })
+        self.assertEqual(lock["registryEvidence"], {
+            "requiresSingleLinuxAmd64Manifest": True,
+            "requiresRawManifestDigest": True,
+            "requiresExactConfigDigest": True,
+            "requiresAnonymousExactDigestPull": True,
+        })
+        self.assertEqual(lock["artifactLockStatus"], "resolved_exact_direct_and_transitive_artifact_hashes")
+        artifact_lock = lock["artifactLock"]
+        self.assertEqual(artifact_lock["artifactCount"], 222)
+        self.assertEqual(artifact_lock["artifactsWithSha256"], 222)
+        self.assertEqual(
+            artifact_lock["builderImage"],
+            "ghcr.io/prefix-dev/pixi@sha256:ad4daaf2f85798f3f88d0489a3b4a7e92c33358709560fb5adf83242803cccbe",
+        )
+        runtime_image = "docker.io/library/debian@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867"
+        self.assertEqual(artifact_lock["runtimeImage"], runtime_image)
+        expected_direct = {
+            "python": "==3.12.12", "r-base": "==4.4.3",
+            "r-ggplot2": "==3.5.2", "r-scales": "==1.4.0",
+            "r-dplyr": "==1.1.4", "r-tidyr": "==1.3.1",
+            "r-readr": "==2.1.5", "r-jsonlite": "==1.9.1",
+            "numpy": "==2.2.6", "pandas": "==2.2.3",
+            "matplotlib": "==3.10.3", "seaborn": "==0.13.2",
+            "fontconfig": "==2.18.3", "fonts-conda-ecosystem": "==1",
+            "fonts-conda-forge": "==1",
+        }
+        manifest = tomllib.loads((ROOT / "renderer" / "pixi.toml").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["workspace"]["platforms"], ["linux-64"])
+        self.assertEqual(manifest["dependencies"], expected_direct)
+
+        package_blocks: list[dict[str, str | None]] = []
+        current: dict[str, str | None] | None = None
+        lock_lines = (ROOT / "renderer" / "pixi.lock").read_text(encoding="utf-8").splitlines()
+        for line in lock_lines:
+            if line.startswith("- conda: "):
+                if current is not None:
+                    package_blocks.append(current)
+                current = {"url": line.removeprefix("- conda: "), "sha256": None}
+            elif current is not None and line.startswith("  sha256: "):
+                current["sha256"] = line.removeprefix("  sha256: ")
+        if current is not None:
+            package_blocks.append(current)
+        self.assertEqual(len(package_blocks), 222)
+        self.assertEqual(len({str(item["url"]) for item in package_blocks}), 222)
+        self.assertTrue(all(str(item["url"]).startswith("https://conda.anaconda.org/conda-forge/") for item in package_blocks))
+        self.assertTrue(all(len(str(item["sha256"])) == 64 and set(str(item["sha256"])) <= set("0123456789abcdef") for item in package_blocks))
+        self.assertEqual(sum(line.startswith("  sha256: ") for line in lock_lines), 222)
+        environment_urls = [line.removeprefix("      - conda: ") for line in lock_lines if line.startswith("      - conda: ")]
+        self.assertEqual(len(environment_urls), 222)
+        self.assertEqual(len(set(environment_urls)), 222)
+        self.assertEqual(set(environment_urls), {str(item["url"]) for item in package_blocks})
+
+        self.assertEqual(set(lock["renderers"]), {"r", "python"})
+        for language, entrypoint in (("r", "render.R"), ("python", "render.py")):
+            context = ROOT / "renderer" / language
+            self.assertTrue((context / "Dockerfile").is_file())
+            self.assertTrue((context / "runner.py").is_file())
+            self.assertEqual(lock["renderers"][language]["trustedEntrypoint"], entrypoint)
+            self.assertEqual(lock["renderers"][language]["baseImage"], runtime_image)
+            self.assertIsNone(lock["renderers"][language]["publishedImageDigest"])
+            dockerfile = (context / "Dockerfile").read_text(encoding="utf-8")
+            self.assertNotIn("# syntax=", dockerfile)
+            self.assertIn(artifact_lock["builderImage"], dockerfile)
+            self.assertIn(runtime_image, dockerfile)
+            self.assertIn("pixi install --frozen --platform linux-64", dockerfile)
+            self.assertNotIn("--no-symbolic-links", dockerfile)
+            self.assertIn("COPY runtime_boundary.py sanitize_runtime.py /opt/sfl/bootstrap-tools/", dockerfile)
+            self.assertIn("sanitize_runtime.py --root /", dockerfile)
+            self.assertIn("rm -rf /opt/sfl/bootstrap-tools", dockerfile)
+            self.assertIn('USER 65532:65532', dockerfile)
+            self.assertIn('WORKDIR /nonexistent', dockerfile)
+            self.assertIn('RUN ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py", "--verify-runtime"]', dockerfile)
+            self.assertIn('ENTRYPOINT ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py"]', dockerfile)
+            runner = (context / "runner.py").read_text(encoding="utf-8")
+            self.assertIn(f'TRUSTED_ENTRYPOINT = "payload/code/{entrypoint}"', runner)
+            self.assertIn("v2 intake is disabled", runner)
+            self.assertIn('/opt/sfl/.pixi/envs/default/bin/Rscript', runner)
+            self.assertIn("os.getuid() != EXPECTED_UID or os.getgid() != EXPECTED_GID", runner)
 
     def test_committed_tree_rejects_gitlink_even_with_one_zip(self) -> None:
         archive_path = "archives/example-template/1.0.0/example-template-1.0.0.zip"

@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   validate:
+    name: sfl-community-archive-policy-v1
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -27,14 +28,18 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: candidate
           persist-credentials: false
-      - name: Enforce archive addition or exact withdrawal policy
+      - name: Run trusted policy unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover --start-directory trusted/tests --pattern 'test_*.py'
+      - name: Enforce append-only archive addition policy
         id: policy
         shell: bash
         run: |
           set -euo pipefail
           python3 trusted/scripts/compare_pr_trees.py trusted candidate --github-output "$GITHUB_OUTPUT"
       - name: Validate and safely extract archive
-        if: steps.policy.outputs.mode == 'add'
         shell: bash
         env:
           ARCHIVE_PATH: ${{ steps.policy.outputs.archive }}
@@ -51,7 +56,6 @@ jobs:
             --expected-template-id "$EXPECTED_TEMPLATE_ID" \
             --expected-release-version "$EXPECTED_RELEASE_VERSION"
       - name: Build reviewed fixed-R renderer
-        if: steps.policy.outputs.mode == 'add'
         shell: bash
         run: |
           set -euo pipefail
@@ -68,7 +72,6 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Re-render untrusted template in hardened container
-        if: steps.policy.outputs.mode == 'add'
         shell: bash
         run: |
           set -euo pipefail
@@ -91,7 +94,6 @@ jobs:
             /submission /output \
             > "$work/output/preview.png"
       - name: Verify rendered PNG identity and canonical RGBA digest
-        if: steps.policy.outputs.mode == 'add'
         shell: bash
         run: |
           set -euo pipefail
@@ -100,14 +102,3 @@ jobs:
             --staging "$work/submission" \
             --rendered "$work/output/preview.png" \
             | tee "$work/validation-report.json"
-      - name: Record exact invalid-seed withdrawal
-        if: steps.policy.outputs.mode == 'withdrawal'
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo '### Exact invalid-seed withdrawal'
-            echo
-            echo 'The trusted-base validator confirmed an atomic deletion of only the three allowlisted archive blobs.'
-            echo 'Archive extraction and rendering are intentionally skipped because no candidate ZIP exists.'
-          } >> "$GITHUB_STEP_SUMMARY"

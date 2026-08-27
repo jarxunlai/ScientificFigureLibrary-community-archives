@@ -269,8 +269,18 @@ class PolicyTests(unittest.TestCase):
             self.assertIn("pixi install --frozen --platform linux-64", dockerfile)
             self.assertNotIn("--no-symbolic-links", dockerfile)
             self.assertIn("COPY runtime_boundary.py sanitize_runtime.py /opt/sfl/bootstrap-tools/", dockerfile)
-            self.assertIn("sanitize_runtime.py --root /", dockerfile)
-            self.assertIn("rm -rf /opt/sfl/bootstrap-tools", dockerfile)
+            self.assertIn(
+                'RUN ["/opt/sfl/.pixi/envs/default/bin/python", "-B", '
+                '"/opt/sfl/bootstrap-tools/sanitize_runtime.py", "--root", "/", '
+                '"--finalize-runner", "/opt/sfl/runner.py", "--cleanup", '
+                '"/opt/sfl/bootstrap-tools"]',
+                dockerfile,
+            )
+            self.assertNotIn("RUN set -eux", dockerfile)
+            self.assertNotIn("chmod 0555", dockerfile)
+            self.assertNotIn("rm -rf /opt/sfl/bootstrap-tools", dockerfile)
+            self.assertNotIn("groupadd", dockerfile)
+            self.assertNotIn("useradd", dockerfile)
             self.assertIn('USER 65532:65532', dockerfile)
             self.assertIn('WORKDIR /nonexistent', dockerfile)
             self.assertIn('RUN ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py", "--verify-runtime"]', dockerfile)

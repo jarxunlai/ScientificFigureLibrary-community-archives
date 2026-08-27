@@ -159,18 +159,36 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", workflow)
         self.assertIn("packages: write", workflow)
         self.assertEqual(workflow.count("packages: write"), 1)
-        self.assertIn("needs.inspect-lock.outputs.publish_ready == 'true'", workflow)
+        self.assertIn("needs.inspect-lock.outputs.publish_bootstrap_images == 'true'", workflow)
+        self.assertIn("concurrency:", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertEqual(workflow.count("timeout-minutes:"), 2)
         self.assertNotIn("pull_request:", workflow)
         self.assertNotIn("pull_request_target:", workflow)
         self.assertNotIn("packages: write", (ROOT / ".github" / "workflows" / "validate-archive-pr.yml").read_text(encoding="utf-8"))
         self.assertIn("v2_intake_enabled=false", workflow)
+        self.assertEqual(workflow.count("docker build --pull --platform linux/amd64"), 1)
+        self.assertIn("scripts/audit_renderer_rootfs.py rootfs.tar", workflow)
+        self.assertIn("bootstrap runner unexpectedly accepted a product-neutral render request", workflow)
+        self.assertIn("Push the exact locally audited image", workflow)
+        self.assertLess(workflow.index("Audit the exact image rootfs"), workflow.index("Authenticate to GHCR"))
+        self.assertLess(workflow.index("Authenticate to GHCR"), workflow.index("docker push"))
+        self.assertGreaterEqual(workflow.count("EXPECTED_IMAGE_ID"), 2)
 
     def test_dual_renderer_bootstrap_contexts_and_lock_contract_are_auditable(self) -> None:
         lock = json.loads((ROOT / "renderer" / "renderer-lock.json").read_text(encoding="utf-8"))
         self.assertEqual(lock["schema"], "figure-library.archive-renderer-lock.v1")
-        self.assertFalse(lock["publishReady"])
+        self.assertNotIn("publishReady", lock)
+        self.assertEqual(lock["bootstrapPublicationMode"], "trusted_main_build_audit_push_same_image")
+        self.assertTrue(lock["publishBootstrapImages"])
         self.assertFalse(lock["v2IntakeEnabled"])
         self.assertFalse(lock["trustedLinuxBuildVerified"])
+        self.assertEqual(lock["rootfsAudit"], {
+            "schema": "figure-library.archive-renderer-rootfs-inventory.v1",
+            "script": "scripts/audit_renderer_rootfs.py",
+            "requiresExactPushedImage": True,
+            "forbidsToolAliasesAndHardlinks": True,
+        })
         self.assertEqual(lock["artifactLockStatus"], "resolved_exact_direct_and_transitive_artifact_hashes")
         artifact_lock = lock["artifactLock"]
         self.assertEqual(artifact_lock["artifactCount"], 222)
@@ -208,11 +226,13 @@ class PolicyTests(unittest.TestCase):
         if current is not None:
             package_blocks.append(current)
         self.assertEqual(len(package_blocks), 222)
+        self.assertEqual(len({str(item["url"]) for item in package_blocks}), 222)
         self.assertTrue(all(str(item["url"]).startswith("https://conda.anaconda.org/conda-forge/") for item in package_blocks))
         self.assertTrue(all(len(str(item["sha256"])) == 64 and set(str(item["sha256"])) <= set("0123456789abcdef") for item in package_blocks))
         self.assertEqual(sum(line.startswith("  sha256: ") for line in lock_lines), 222)
         environment_urls = [line.removeprefix("      - conda: ") for line in lock_lines if line.startswith("      - conda: ")]
         self.assertEqual(len(environment_urls), 222)
+        self.assertEqual(len(set(environment_urls)), 222)
         self.assertEqual(set(environment_urls), {str(item["url"]) for item in package_blocks})
 
         self.assertEqual(set(lock["renderers"]), {"r", "python"})
@@ -229,7 +249,9 @@ class PolicyTests(unittest.TestCase):
             self.assertIn(runtime_image, dockerfile)
             self.assertIn("pixi install --frozen --platform linux-64", dockerfile)
             self.assertNotIn("--no-symbolic-links", dockerfile)
-            self.assertIn("rm -f /bin/sh /bin/bash /bin/dash /usr/bin/sh /usr/bin/bash /usr/bin/dash", dockerfile)
+            self.assertIn("COPY runtime_boundary.py sanitize_runtime.py /opt/sfl/bootstrap-tools/", dockerfile)
+            self.assertIn("sanitize_runtime.py --root /", dockerfile)
+            self.assertIn("rm -rf /opt/sfl/bootstrap-tools", dockerfile)
             runner = (context / "runner.py").read_text(encoding="utf-8")
             self.assertIn(f'TRUSTED_ENTRYPOINT = "payload/code/{entrypoint}"', runner)
             self.assertIn("v2 intake is disabled", runner)

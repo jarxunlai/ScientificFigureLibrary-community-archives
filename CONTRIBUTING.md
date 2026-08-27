@@ -50,14 +50,17 @@ intended to contain the fixed R and Python runtimes, but each runner permits
 only its own trusted entrypoint. `renderer/pixi.lock` pins the shared Linux
 environment to 222 exact conda-forge artifact URLs and SHA-256 values.
 `renderer/renderer-lock.json` records the package contract and digest-pinned
-build/final OCI foundations, but deliberately keeps `publishReady=false` until
-a trusted Linux build verifies the final hardened rootfs.
+build/final OCI foundations. Bootstrap publication is explicitly enabled only
+for trusted `main`, while `trustedLinuxBuildVerified=false`,
+`v2IntakeEnabled=false`, and null source-pinned image digests remain fail closed
+until the resulting evidence is reviewed.
 
 Only `.github/workflows/publish-renderer-bootstrap.yml`, running from trusted
-`main`, may request `packages: write`. It records build evidence and any real
-registry digest produced by GHCR; it never writes an unknown or placeholder
-digest into the repository. Archive pull-request validation remains on the v1
-fixed-R container until a later reviewed policy change enables v2 intake.
+`main`, may request `packages: write`. It builds, verifies, inventories, and
+pushes the same image instance, then records the real GHCR digest. It never
+writes an unknown or placeholder digest into the repository. Archive
+pull-request validation remains on the v1 fixed-R container until a later
+reviewed policy change pins those digests and enables v2 intake.
 
 ## Human visual and rights review remains mandatory
 

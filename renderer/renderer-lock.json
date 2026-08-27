@@ -1,8 +1,15 @@
 {
   "schema": "figure-library.archive-renderer-lock.v1",
-  "publishReady": false,
+  "bootstrapPublicationMode": "trusted_main_build_audit_push_same_image",
+  "publishBootstrapImages": true,
   "v2IntakeEnabled": false,
   "trustedLinuxBuildVerified": false,
+  "rootfsAudit": {
+    "schema": "figure-library.archive-renderer-rootfs-inventory.v1",
+    "script": "scripts/audit_renderer_rootfs.py",
+    "requiresExactPushedImage": true,
+    "forbidsToolAliasesAndHardlinks": true
+  },
   "requiredRuntimeVersions": {
     "r": "4.4.3",
     "python": "3.12.12"

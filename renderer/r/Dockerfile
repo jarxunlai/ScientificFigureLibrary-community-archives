@@ -23,8 +23,6 @@ ENV PATH="/opt/sfl/.pixi/envs/default/bin" \
     MPLCONFIGDIR="/tmp/sfl-matplotlib"
 
 RUN set -eux; \
-    groupadd --gid 65532 sfl; \
-    useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sfl; \
     chmod 0555 /opt/sfl/runner.py; \
     /opt/sfl/.pixi/envs/default/bin/python /opt/sfl/bootstrap-tools/sanitize_runtime.py --root /; \
     rm -rf /opt/sfl/bootstrap-tools

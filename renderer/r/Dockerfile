@@ -23,6 +23,8 @@ ENV PATH="/opt/sfl/.pixi/envs/default/bin" \
     MPLCONFIGDIR="/tmp/sfl-matplotlib"
 
 RUN ["/opt/sfl/.pixi/envs/default/bin/python", "-B", "/opt/sfl/bootstrap-tools/sanitize_runtime.py", "--root", "/", "--finalize-runner", "/opt/sfl/runner.py", "--cleanup", "/opt/sfl/bootstrap-tools"]
+COPY --chmod=0555 r_launcher.py /opt/sfl/.pixi/envs/default/lib/R/bin/R
+COPY --chmod=0555 r_launcher.py /opt/sfl/.pixi/envs/default/bin/R
 
 USER 65532:65532
 WORKDIR /nonexistent

@@ -34,9 +34,35 @@ boundary = load("runtime_boundary_test", "renderer/runtime_boundary.py")
 oci = load("verify_renderer_oci", "scripts/verify_renderer_oci.py")
 r_runner = load("renderer_r_runner", "renderer/r/runner.py")
 python_runner = load("renderer_python_runner", "renderer/python/runner.py")
+r_launcher = load("renderer_r_launcher", "renderer/r_launcher.py")
 
 
 class RendererBootstrapTests(unittest.TestCase):
+    def test_shell_free_r_launcher_execs_only_the_pinned_direct_binary(self):
+        original = list(sys.argv)
+        try:
+            sys.argv = ["R", "--vanilla", "-e", "cat(getRversion())"]
+            with mock.patch.object(r_launcher.os, "execve") as execute:
+                r_launcher.main()
+            execute.assert_called_once()
+            executable, arguments, environment = execute.call_args.args
+            self.assertEqual(executable, "/opt/sfl/.pixi/envs/default/lib/R/bin/exec/R")
+            self.assertEqual(
+                arguments,
+                [executable, "--vanilla", "-e", "cat(getRversion())"],
+            )
+            self.assertEqual(environment["R_HOME"], "/opt/sfl/.pixi/envs/default/lib/R")
+            self.assertEqual(environment["R_SHARE_DIR"], f'{environment["R_HOME"]}/share')
+            self.assertEqual(environment["R_INCLUDE_DIR"], f'{environment["R_HOME"]}/include')
+            self.assertEqual(environment["R_DOC_DIR"], f'{environment["R_HOME"]}/doc')
+            self.assertEqual(environment["R_ARCH"], "")
+            self.assertEqual(
+                environment["LD_LIBRARY_PATH"],
+                "/opt/sfl/.pixi/envs/default/lib/R/lib:/opt/sfl/.pixi/envs/default/lib",
+            )
+        finally:
+            sys.argv = original
+
     def test_finalize_runtime_uses_python_for_mode_and_bootstrap_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

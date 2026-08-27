@@ -169,6 +169,7 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("v2_intake_enabled=false", workflow)
         self.assertEqual(workflow.count("docker build --pull --platform linux/amd64"), 1)
         self.assertIn("scripts/audit_renderer_rootfs.py rootfs.tar", workflow)
+        self.assertEqual(workflow.count('"requiresExactProtocolShim": True'), 1)
         self.assertIn("scripts/verify_renderer_oci.py image-config", workflow)
         self.assertIn("scripts/verify_renderer_oci.py registry-manifest", workflow)
         self.assertIn("bootstrap runner returned unexpected disabled-intake status", workflow)
@@ -201,6 +202,7 @@ class PolicyTests(unittest.TestCase):
             "forbidsToolAliasesAndHardlinks": True,
             "scansCommittedRunAndTmp": True,
             "forbidsShellShebangExecutables": True,
+            "requiresExactProtocolShim": True,
         })
         self.assertEqual(lock["registryEvidence"], {
             "requiresSingleLinuxAmd64Manifest": True,

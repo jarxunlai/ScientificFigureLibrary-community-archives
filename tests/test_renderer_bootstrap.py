@@ -35,6 +35,7 @@ oci = load("verify_renderer_oci", "scripts/verify_renderer_oci.py")
 r_runner = load("renderer_r_runner", "renderer/r/runner.py")
 python_runner = load("renderer_python_runner", "renderer/python/runner.py")
 r_launcher = load("renderer_r_launcher", "renderer/r_launcher.py")
+protocol_shim = load("renderer_protocol_shim", "renderer/protocol_shim.py")
 
 
 class RendererBootstrapTests(unittest.TestCase):
@@ -56,10 +57,115 @@ class RendererBootstrapTests(unittest.TestCase):
             self.assertEqual(environment["R_INCLUDE_DIR"], f'{environment["R_HOME"]}/include')
             self.assertEqual(environment["R_DOC_DIR"], f'{environment["R_HOME"]}/doc')
             self.assertEqual(environment["R_ARCH"], "")
+            self.assertEqual(environment["R_LIBS_SITE"], f'{environment["R_HOME"]}/library')
+            self.assertEqual(environment["R_LIBS_USER"], "/nonexistent")
             self.assertEqual(
                 environment["LD_LIBRARY_PATH"],
                 "/opt/sfl/.pixi/envs/default/lib/R/lib:/opt/sfl/.pixi/envs/default/lib",
             )
+        finally:
+            sys.argv = original
+
+    def test_renderer_runtime_verification_binds_explicit_r_library_paths(self) -> None:
+        for runner in (r_runner, python_runner):
+            with self.subTest(runner=runner.__name__), mock.patch.object(
+                runner, "verify_runtime_identity"
+            ), mock.patch.object(
+                runner.sys, "version_info", (3, 12, 12)
+            ), mock.patch(
+                "importlib.metadata.version",
+                side_effect=lambda package: runner.EXPECTED_PYTHON_PACKAGES[package],
+            ), mock.patch.object(runner.subprocess, "run") as run:
+                runner.verify_runtime()
+                run.assert_called_once()
+                command = run.call_args.args[0]
+                environment = run.call_args.kwargs["env"]
+                self.assertEqual(command[:3], [
+                    "/opt/sfl/.pixi/envs/default/bin/Rscript", "--vanilla", "-e",
+                ])
+                self.assertIn('invisible(loadNamespace("utils"))', command[3])
+                self.assertIn('utils::packageVersion("ggplot2")', command[3])
+                self.assertEqual(environment["R_DEFAULT_PACKAGES"], "NULL")
+                self.assertEqual(environment["R_HOME"], "/opt/sfl/.pixi/envs/default/lib/R")
+                self.assertEqual(environment["R_LIBS_SITE"], "/opt/sfl/.pixi/envs/default/lib/R/library")
+                self.assertEqual(environment["R_LIBS_USER"], "/nonexistent")
+
+    def test_protocol_shim_accepts_only_the_fixed_r_to_python_helper_argv(self):
+        command = (
+            "'/opt/sfl/mixed_helper.py' --helper payload/code/helpers/model.py "
+            "-- --label 'value with spaces'"
+        )
+        self.assertEqual(
+            protocol_shim.parse_allowed_command(["/bin/sh", "-c", command]),
+            ["--helper", "payload/code/helpers/model.py", "--", "--label", "value with spaces"],
+        )
+
+        rejected = (
+            ["/bin/sh", "-ec", command],
+            ["/bin/sh", "-c", command, "extra"],
+            ["/bin/sh", "-c", "/usr/bin/which 'uname' 2>/dev/null"],
+            ["/bin/sh", "-c", "LANG=C /opt/sfl/mixed_helper.py --helper payload/code/helper.py"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py payload/code/helper.py"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/render.py"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/helper.R"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/helper.py --helper payload/code/other.R"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/helper.py --value 7"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/../helper.py"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/helper.py; /bin/id"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/helper.py > /tmp/out"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/helper.py $(id)"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper payload/code/helper.py `id`"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py --helper 'unterminated"],
+            ["/bin/sh", "-c", "/opt/sfl/mixed_helper.py\n--helper payload/code/helper.py"],
+        )
+        for arguments in rejected:
+            with self.subTest(arguments=arguments):
+                self.assertIsNone(protocol_shim.parse_allowed_command(arguments))
+
+    def test_protocol_shim_rejects_absent_helper_and_execs_with_fixed_argv_and_environment(self):
+        original = list(sys.argv)
+        command = "/opt/sfl/mixed_helper.py --helper payload/code/helper.py -- --value 7"
+        try:
+            sys.argv = ["/bin/sh", "-c", command]
+            with mock.patch.object(protocol_shim.os.path, "isfile", return_value=False), mock.patch.object(
+                protocol_shim.os, "execve"
+            ) as execute:
+                self.assertEqual(protocol_shim.main(), protocol_shim.REJECTED)
+                execute.assert_not_called()
+
+            with mock.patch.dict(protocol_shim.os.environ, {"LANG": "C.UTF-8", "UNSAFE": "drop-me"}, clear=True), mock.patch.object(
+                protocol_shim.os.path, "isfile", return_value=True
+            ), mock.patch.object(protocol_shim.os.path, "islink", return_value=False), mock.patch.object(
+                protocol_shim.os, "execve", side_effect=RuntimeError("execve replaces the process")
+            ) as execute:
+                with self.assertRaisesRegex(RuntimeError, "execve replaces the process"):
+                    protocol_shim.main()
+                execute.assert_called_once()
+                executable, arguments, environment = execute.call_args.args
+                self.assertEqual(executable, protocol_shim.PYTHON)
+                self.assertEqual(
+                    arguments,
+                    [
+                        protocol_shim.PYTHON,
+                        "-I",
+                        "-B",
+                        protocol_shim.MIXED_HELPER,
+                        "--helper",
+                        "payload/code/helper.py",
+                        "--",
+                        "--value",
+                        "7",
+                    ],
+                )
+                self.assertEqual(environment["LANG"], "C.UTF-8")
+                self.assertNotIn("UNSAFE", environment)
+                self.assertEqual(environment["PATH"], "/opt/sfl/.pixi/envs/default/bin")
+                self.assertEqual(environment["SFL_MIXED_HELPER_RUNNER"], protocol_shim.MIXED_HELPER)
+
+            with mock.patch.object(protocol_shim.os.path, "isfile", return_value=True), mock.patch.object(
+                protocol_shim.os.path, "islink", return_value=False
+            ), mock.patch.object(protocol_shim.os, "execve", side_effect=OSError("exec failed")):
+                self.assertEqual(protocol_shim.main(), protocol_shim.REJECTED)
         finally:
             sys.argv = original
 
@@ -165,11 +271,24 @@ class RendererBootstrapTests(unittest.TestCase):
                     handle.addfile(item)
 
     @staticmethod
-    def minimum_rootfs(extra: list[tuple[str, bytes, int, bytes | None]] | None = None):
+    def minimum_rootfs(
+        extra: list[tuple[str, bytes, int, bytes | None]] | None = None,
+        *,
+        shim_payload: bytes | None = None,
+        shim_mode: int = 0o555,
+        bin_target: bytes = b"usr/bin",
+    ):
+        if shim_payload is None:
+            shim_payload = (ROOT / "renderer" / "protocol_shim.py").read_bytes()
         entries = [
+            ("bin", tarfile.SYMTYPE, 0o777, bin_target),
+            ("usr/bin/sh", b"file", shim_mode, shim_payload),
+            ("opt/sfl/.pixi/envs/default/bin/R", b"file", 0o555, b"R launcher"),
             ("opt/sfl/.pixi/envs/default/bin/python", b"file", 0o755, b"python"),
             ("opt/sfl/.pixi/envs/default/bin/Rscript", b"file", 0o755, b"Rscript"),
-            ("opt/sfl/runner.py", b"file", 0o755, b"runner"),
+            ("opt/sfl/.pixi/envs/default/lib/R/bin/R", b"file", 0o555, b"R launcher"),
+            ("opt/sfl/.pixi/envs/default/lib/R/bin/exec/R", b"file", 0o755, b"native R"),
+            ("opt/sfl/runner.py", b"file", 0o555, b"runner"),
         ]
         return entries + (extra or [])
 
@@ -180,10 +299,41 @@ class RendererBootstrapTests(unittest.TestCase):
             self.write_tar(archive, self.minimum_rootfs())
             inventory = audit.audit_rootfs(archive)
             self.assertEqual(inventory["schema"], audit.INVENTORY_SCHEMA)
-            self.assertEqual(inventory["executableCount"], 3)
+            self.assertEqual(inventory["executableCount"], len(audit.REQUIRED_EXECUTABLES))
             rows = inventory["executables"]
             self.assertEqual({row["path"] for row in rows}, set(audit.REQUIRED_EXECUTABLES))
             self.assertTrue(all(len(row["sha256"]) == 64 for row in rows))
+
+    def test_rootfs_audit_requires_every_pinned_runtime_executable(self) -> None:
+        baseline = self.minimum_rootfs()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index, required in enumerate(audit.REQUIRED_EXECUTABLES):
+                archive = root / f"missing-required-{index}.tar"
+                self.write_tar(archive, [entry for entry in baseline if entry[0] != required])
+                with self.subTest(required=required), self.assertRaisesRegex(
+                    SystemExit, "executable boundary failed"
+                ):
+                    audit.audit_rootfs(archive)
+
+    def test_rootfs_audit_binds_the_only_shell_path_to_exact_protocol_shim(self) -> None:
+        cases = {
+            "changed bytes": self.minimum_rootfs(shim_payload=b"#!/fixed/python\nraise SystemExit(126)\n"),
+            "changed mode": self.minimum_rootfs(shim_mode=0o755),
+            "changed merged usr target": self.minimum_rootfs(bin_target=b"opt/sfl"),
+            "non-exact merged usr target": self.minimum_rootfs(bin_target=b"./usr/bin"),
+            "additional shell": self.minimum_rootfs([("usr/local/bin/sh", b"file", 0o555, b"fake")]),
+            "shell symlink alias": self.minimum_rootfs(
+                [("usr/local/bin/sh", tarfile.SYMTYPE, 0o777, b"/bin/python")]
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for index, (label, entries) in enumerate(cases.items()):
+                archive = root / f"protocol-{index}.tar"
+                self.write_tar(archive, entries)
+                with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "executable boundary failed"):
+                    audit.audit_rootfs(archive)
 
     def test_rootfs_audit_rejects_forbidden_tools_and_symlink_hardlink_aliases(self) -> None:
         cases = {

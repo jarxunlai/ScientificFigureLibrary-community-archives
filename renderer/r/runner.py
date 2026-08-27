@@ -46,10 +46,34 @@ def verify_runtime() -> None:
         if importlib.metadata.version(package) != expected:
             raise SystemExit(f"Python package version mismatch: {package}")
     expression = ";".join(
-        [f'stopifnot(getRversion() == "{EXPECTED_R}")']
-        + [f'stopifnot(as.character(packageVersion("{name}")) == "{version}")' for name, version in EXPECTED_R_PACKAGES.items()]
+        [
+            f'stopifnot(getRversion() == "{EXPECTED_R}")',
+            'invisible(loadNamespace("utils"))',
+            'invisible(loadNamespace("stats"))',
+        ]
+        + [
+            statement
+            for name, version in EXPECTED_R_PACKAGES.items()
+            for statement in (
+                f'invisible(loadNamespace("{name}"))',
+                f'stopifnot(as.character(utils::packageVersion("{name}")) == "{version}")',
+            )
+        ]
     )
-    subprocess.run(["/opt/sfl/.pixi/envs/default/bin/Rscript", "--vanilla", "-e", expression], check=True)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "R_DEFAULT_PACKAGES": "NULL",
+            "R_HOME": "/opt/sfl/.pixi/envs/default/lib/R",
+            "R_LIBS_SITE": "/opt/sfl/.pixi/envs/default/lib/R/library",
+            "R_LIBS_USER": "/nonexistent",
+        }
+    )
+    subprocess.run(
+        ["/opt/sfl/.pixi/envs/default/bin/Rscript", "--vanilla", "-e", expression],
+        check=True,
+        env=environment,
+    )
 
 
 def main() -> int:

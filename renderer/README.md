@@ -37,7 +37,11 @@ audit the exact image rootfs, and only then push that same local image instance.
 The audit includes committed `/run` and `/tmp` trees, inventories every
 executable by streamed SHA-256, reads each executable's bounded shebang, and
 rejects ordinary shells, package/install/download/build tools, special files,
-privilege bits, and symlink/hard-link aliases to forbidden tools. The pushed raw
+privilege bits, and symlink/hard-link aliases to forbidden tools. The only
+`/bin/sh` path resolves through Debian's exact merged-usr `/bin` link to a
+regular 0555 Python protocol broker at `/usr/bin/sh`, byte-bound to the reviewed
+repository source. It is not a shell: it rejects every command except the fixed
+future R-to-Python mixed-helper argv protocol. The pushed raw
 single-image manifest must hash to the reported digest and bind that audited
 config. After strict logout, a new empty Docker configuration must anonymously
 inspect and pull the exact digest; a private first-publish GHCR package fails

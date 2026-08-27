@@ -21,6 +21,8 @@ def main() -> None:
             "R_INCLUDE_DIR": f"{R_HOME}/include",
             "R_DOC_DIR": f"{R_HOME}/doc",
             "R_ARCH": "",
+            "R_LIBS_SITE": f"{R_HOME}/library",
+            "R_LIBS_USER": "/nonexistent",
             "LD_LIBRARY_PATH": f"{R_HOME}/lib:{PREFIX}/lib",
         }
     )

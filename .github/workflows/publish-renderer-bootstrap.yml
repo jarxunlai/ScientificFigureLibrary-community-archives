@@ -65,6 +65,7 @@ jobs:
               "forbidsToolAliasesAndHardlinks": True,
               "scansCommittedRunAndTmp": True,
               "forbidsShellShebangExecutables": True,
+              "requiresExactProtocolShim": True,
           }
           if lock.get("rootfsAudit") != expected_rootfs_audit:
               raise SystemExit("unexpected renderer rootfs audit contract")

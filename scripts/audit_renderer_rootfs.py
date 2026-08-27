@@ -4,7 +4,10 @@
 The bootstrap renderer is deliberately disabled for Archive intake.  This
 audit binds the exact image that will be pushed to an executable inventory and
 fails closed when package/install/download/build tools, ordinary shells, unsafe
-special files, privilege bits, or aliases to forbidden tools remain.
+special files, privilege bits, or aliases to forbidden tools remain.  The sole
+``/bin/sh`` exception resolves through Debian's exact merged-usr ``/bin`` link
+to a regular 0555 ``/usr/bin/sh`` file byte-identical to the reviewed Python
+protocol broker committed in this repository.
 """
 
 from __future__ import annotations
@@ -27,10 +30,19 @@ from runtime_boundary import forbidden_python_path, forbidden_tool_name, shell_s
 
 INVENTORY_SCHEMA = "figure-library.archive-renderer-rootfs-inventory.v1"
 REQUIRED_EXECUTABLES = (
+    "opt/sfl/.pixi/envs/default/bin/R",
     "opt/sfl/.pixi/envs/default/bin/Rscript",
     "opt/sfl/.pixi/envs/default/bin/python",
+    "opt/sfl/.pixi/envs/default/lib/R/bin/R",
+    "opt/sfl/.pixi/envs/default/lib/R/bin/exec/R",
     "opt/sfl/runner.py",
+    "usr/bin/sh",
 )
+MERGED_USR_BIN_PATH = "bin"
+MERGED_USR_BIN_TARGET = "usr/bin"
+PROTOCOL_SHELL_PATH = "usr/bin/sh"
+PROTOCOL_SHIM_MODE = 0o555
+PROTOCOL_SHIM_SOURCE = ROOT / "renderer" / "protocol_shim.py"
 # ``docker export`` contains the image's committed /run and /tmp trees.  They
 # are not virtual filesystems and must stay inside the executable boundary.
 # Only the mount-backed kernel/device trees are excluded from the image audit.
@@ -156,6 +168,12 @@ def member_has_shell_shebang(handle: tarfile.TarFile, member: tarfile.TarInfo) -
     return shell_shebang_line(line)
 
 
+def expected_protocol_shim_sha256() -> str:
+    if not PROTOCOL_SHIM_SOURCE.is_file() or PROTOCOL_SHIM_SOURCE.is_symlink():
+        fail("reviewed protocol shim source must be one regular non-symlink file")
+    return hashlib.sha256(PROTOCOL_SHIM_SOURCE.read_bytes()).hexdigest()
+
+
 def audit_rootfs(archive: Path) -> dict[str, object]:
     if not archive.is_file() or archive.is_symlink():
         fail("rootfs archive must be one regular non-symlink file")
@@ -166,10 +184,17 @@ def audit_rootfs(archive: Path) -> dict[str, object]:
         for entry in entries.values():
             own_name = PurePosixPath(entry.path).name
             target_name = PurePosixPath(entry.link_target).name if entry.link_target else None
-            forbidden_named_executable = entry.kind == "file" and bool(entry.mode & 0o111) and forbidden_tool_name(own_name)
+            protocol_shell_candidate = entry.path == PROTOCOL_SHELL_PATH and entry.kind == "file"
+            forbidden_named_executable = (
+                entry.kind == "file"
+                and bool(entry.mode & 0o111)
+                and forbidden_tool_name(own_name)
+                and not protocol_shell_candidate
+            )
             resolved_link = resolve_file(entry.path, entries) if entry.kind in {"symlink", "hardlink"} else None
             forbidden_link = entry.kind in {"symlink", "hardlink"} and (
-                (resolved_link is not None and bool(resolved_link.mode & 0o111) and forbidden_tool_name(own_name))
+                forbidden_tool_name(own_name)
+                or (resolved_link is not None and bool(resolved_link.mode & 0o111) and forbidden_tool_name(own_name))
                 or (target_name is not None and forbidden_tool_name(target_name))
             )
             if forbidden_named_executable or forbidden_link:
@@ -188,7 +213,12 @@ def audit_rootfs(archive: Path) -> dict[str, object]:
             names = {PurePosixPath(path).name, PurePosixPath(resolved.path).name}
             if entry.link_target:
                 names.add(PurePosixPath(entry.link_target).name)
-            if any(forbidden_tool_name(name) for name in names):
+            protocol_shell_candidate = (
+                path == PROTOCOL_SHELL_PATH
+                and entry.kind == "file"
+                and resolved.path == PROTOCOL_SHELL_PATH
+            )
+            if any(forbidden_tool_name(name) for name in names) and not protocol_shell_candidate:
                 violations.append(f"forbidden executable identity: {path} resolves to {resolved.path}")
             if resolved.path not in shebang_cache:
                 shebang_cache[resolved.path] = member_has_shell_shebang(handle, resolved.member)
@@ -206,6 +236,29 @@ def audit_rootfs(archive: Path) -> dict[str, object]:
                     "sha256": digest_cache[resolved.path],
                 }
             )
+
+        merged_usr_bin = entries.get(MERGED_USR_BIN_PATH)
+        if (
+            merged_usr_bin is None
+            or merged_usr_bin.kind != "symlink"
+            or merged_usr_bin.member.linkname != MERGED_USR_BIN_TARGET
+            or merged_usr_bin.link_target != MERGED_USR_BIN_TARGET
+        ):
+            violations.append("/bin must be the exact merged-usr symlink to usr/bin")
+
+        expected_shim_digest = expected_protocol_shim_sha256()
+        protocol_entry = entries.get(PROTOCOL_SHELL_PATH)
+        if protocol_entry is None or protocol_entry.kind != "file":
+            violations.append(f"reviewed protocol shim is missing or not a regular file: {PROTOCOL_SHELL_PATH}")
+        else:
+            if stat.S_IMODE(protocol_entry.mode) != PROTOCOL_SHIM_MODE:
+                violations.append(f"reviewed protocol shim mode differs from 0555: {PROTOCOL_SHELL_PATH}")
+            digest = digest_cache.get(protocol_entry.path)
+            if digest is None:
+                digest = streamed_member_sha256(handle, protocol_entry.member)
+                digest_cache[protocol_entry.path] = digest
+            if digest != expected_shim_digest:
+                violations.append(f"reviewed protocol shim bytes differ from repository source: {PROTOCOL_SHELL_PATH}")
 
         for required in REQUIRED_EXECUTABLES:
             resolved = resolve_file(required, entries)

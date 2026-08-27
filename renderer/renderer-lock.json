@@ -10,7 +10,8 @@
     "requiresExactPushedImage": true,
     "forbidsToolAliasesAndHardlinks": true,
     "scansCommittedRunAndTmp": true,
-    "forbidsShellShebangExecutables": true
+    "forbidsShellShebangExecutables": true,
+    "requiresExactProtocolShim": true
   },
   "registryEvidence": {
     "requiresSingleLinuxAmd64Manifest": true,

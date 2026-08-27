@@ -26,11 +26,10 @@ RUN set -eux; \
     groupadd --gid 65532 sfl; \
     useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sfl; \
     chmod 0555 /opt/sfl/runner.py; \
-    /opt/sfl/.pixi/envs/default/bin/python /opt/sfl/runner.py --verify-runtime; \
     /opt/sfl/.pixi/envs/default/bin/python /opt/sfl/bootstrap-tools/sanitize_runtime.py --root /; \
-    /opt/sfl/.pixi/envs/default/bin/python /opt/sfl/runner.py --verify-runtime; \
     rm -rf /opt/sfl/bootstrap-tools
 
 USER 65532:65532
 WORKDIR /nonexistent
+RUN ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py", "--verify-runtime"]
 ENTRYPOINT ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py"]

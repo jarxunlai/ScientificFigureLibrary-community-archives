@@ -8,7 +8,15 @@
     "schema": "figure-library.archive-renderer-rootfs-inventory.v1",
     "script": "scripts/audit_renderer_rootfs.py",
     "requiresExactPushedImage": true,
-    "forbidsToolAliasesAndHardlinks": true
+    "forbidsToolAliasesAndHardlinks": true,
+    "scansCommittedRunAndTmp": true,
+    "forbidsShellShebangExecutables": true
+  },
+  "registryEvidence": {
+    "requiresSingleLinuxAmd64Manifest": true,
+    "requiresRawManifestDigest": true,
+    "requiresExactConfigDigest": true,
+    "requiresAnonymousExactDigestPull": true
   },
   "requiredRuntimeVersions": {
     "r": "4.4.3",

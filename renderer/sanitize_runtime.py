@@ -9,9 +9,11 @@ import shutil
 import stat
 from pathlib import Path
 
-from runtime_boundary import SHELL_NAMES, forbidden_python_path, forbidden_tool_name
+from runtime_boundary import forbidden_python_path, forbidden_tool_name, shell_shebang_line
 
-VIRTUAL_TOP_LEVEL = {"dev", "proc", "run", "sys", "tmp"}
+# Only mount-backed runtime filesystems are excluded. ``/run`` and ``/tmp``
+# may contain files committed by an image layer, so both remain in the scan.
+VIRTUAL_TOP_LEVEL = {"dev", "proc", "sys"}
 
 
 def shell_shebang(path: Path) -> bool:
@@ -20,19 +22,7 @@ def shell_shebang(path: Path) -> bool:
             line = handle.readline(512)
     except OSError:
         return False
-    if not line.startswith(b"#!"):
-        return False
-    words = line[2:].decode("utf-8", "replace").strip().split()
-    if not words:
-        return False
-    interpreter = Path(words[0]).name.casefold()
-    if interpreter == "env" and len(words) > 1:
-        remaining = words[1:]
-        if remaining and remaining[0] == "-S":
-            remaining = remaining[1:]
-        if remaining:
-            interpreter = Path(remaining[0]).name.casefold()
-    return interpreter in SHELL_NAMES
+    return shell_shebang_line(line)
 
 
 def sanitize(root: Path) -> list[str]:

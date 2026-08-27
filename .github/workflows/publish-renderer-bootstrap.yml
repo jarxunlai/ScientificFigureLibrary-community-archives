@@ -7,6 +7,7 @@ on:
     paths:
       - renderer/**
       - scripts/audit_renderer_rootfs.py
+      - scripts/verify_renderer_oci.py
       - .github/workflows/publish-renderer-bootstrap.yml
   workflow_dispatch:
 
@@ -62,9 +63,19 @@ jobs:
               "script": "scripts/audit_renderer_rootfs.py",
               "requiresExactPushedImage": True,
               "forbidsToolAliasesAndHardlinks": True,
+              "scansCommittedRunAndTmp": True,
+              "forbidsShellShebangExecutables": True,
           }
           if lock.get("rootfsAudit") != expected_rootfs_audit:
               raise SystemExit("unexpected renderer rootfs audit contract")
+          expected_registry_evidence = {
+              "requiresSingleLinuxAmd64Manifest": True,
+              "requiresRawManifestDigest": True,
+              "requiresExactConfigDigest": True,
+              "requiresAnonymousExactDigestPull": True,
+          }
+          if lock.get("registryEvidence") != expected_registry_evidence:
+              raise SystemExit("unexpected renderer registry evidence contract")
           artifact_lock = lock.get("artifactLock", {})
           if artifact_lock.get("format") != "pixi-lock-v7":
               raise SystemExit("unexpected renderer artifact lock format")
@@ -179,38 +190,63 @@ jobs:
         env:
           TAG: ${{ steps.build.outputs.tag }}
           EXPECTED_IMAGE_ID: ${{ steps.build.outputs.image_id }}
+          RENDERER: ${{ matrix.renderer }}
         run: |
           set -euo pipefail
-          docker run --rm "$TAG" --verify-runtime
           canary="$RUNNER_TEMP/sfl-renderer-disabled-canary"
+          inspect_json="$RUNNER_TEMP/sfl-renderer-${RENDERER}-image-inspect.json"
           rm -rf "$canary"
           mkdir -p "$canary/input" "$canary/output"
           chmod 0777 "$canary/output"
+          test ! -e "$inspect_json"
+          test "$(docker image inspect "$TAG" --format '{{.Id}}')" = "$EXPECTED_IMAGE_ID"
+          docker image inspect "$EXPECTED_IMAGE_ID" > "$inspect_json"
+          python3 scripts/verify_renderer_oci.py image-config "$inspect_json" \
+            --expected-image-id "$EXPECTED_IMAGE_ID"
+
+          hardened=(
+            --rm
+            --network none
+            --read-only
+            --user 65532:65532
+            --workdir /nonexistent
+            --cap-drop ALL
+            --security-opt no-new-privileges:true
+            --cpus 1
+            --memory 1g
+            --memory-swap 1g
+            --pids-limit 64
+            --ulimit nofile=256:256
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+          )
+          timeout --signal=KILL 30s docker run "${hardened[@]}" \
+            "$TAG" --verify-runtime \
+            >"$canary/verify-stdout.txt" 2>"$canary/verify-stderr.txt"
+          test ! -s "$canary/verify-stdout.txt"
+          test ! -s "$canary/verify-stderr.txt"
+
           set +e
-          timeout --signal=KILL 30s docker run --rm \
-            --network none \
-            --read-only \
-            --cap-drop ALL \
-            --security-opt no-new-privileges:true \
-            --cpus 1 \
-            --memory 1g \
-            --memory-swap 1g \
-            --pids-limit 64 \
-            --ulimit nofile=256:256 \
-            --tmpfs /tmp:rw,noexec,nosuid,nodev \
+          timeout --signal=KILL 30s docker run "${hardened[@]}" \
             --mount "type=bind,src=$canary/input,dst=/submission,readonly" \
             --mount "type=bind,src=$canary/output,dst=/output" \
             "$TAG" --input-dir /submission --output /output/preview.png \
             >"$canary/stdout.txt" 2>"$canary/stderr.txt"
           status=$?
           set -e
-          if test "$status" -eq 0; then
-            echo 'bootstrap runner unexpectedly accepted a product-neutral render request' >&2
+          if test "$status" -ne 1; then
+            echo "bootstrap runner returned unexpected disabled-intake status: $status" >&2
             exit 1
           fi
-          test "$status" -ne 124 -a "$status" -ne 137
-          grep -Fx 'v2 intake is disabled for this renderer bootstrap' "$canary/stderr.txt" >/dev/null
-          test ! -e "$canary/output/preview.png"
+          test ! -s "$canary/stdout.txt"
+          printf '%s\n' 'v2 intake is disabled for this renderer bootstrap' > "$canary/expected-stderr.txt"
+          if ! cmp -s "$canary/expected-stderr.txt" "$canary/stderr.txt"; then
+            echo 'bootstrap runner did not return the exact disabled-intake diagnostic' >&2
+            exit 1
+          fi
+          if test -n "$(find "$canary/output" -mindepth 1 -print -quit)"; then
+            echo 'bootstrap runner wrote output despite disabled intake' >&2
+            exit 1
+          fi
           test "$(docker image inspect "$TAG" --format '{{.Id}}')" = "$EXPECTED_IMAGE_ID"
       - name: Audit the exact image rootfs and executable inventory
         id: audit
@@ -252,12 +288,63 @@ jobs:
         run: |
           set -euo pipefail
           test "$(docker image inspect "$TAG" --format '{{.Id}}')" = "$EXPECTED_IMAGE_ID"
-          docker push "$TAG" | tee push-output.txt
-          digest="$(sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' push-output.txt | tail -n 1)"
-          test -n "$digest"
+          docker push --platform linux/amd64 "$TAG" 2>&1 | tee push-output.txt
+          mapfile -t pushed_digests < <(
+            sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' push-output.txt
+          )
+          test "${#pushed_digests[@]}" -eq 1
+          digest="${pushed_digests[0]}"
           remote="${IMAGE}@${digest}"
-          docker buildx imagetools inspect "$remote" >/dev/null
+          manifest="$RUNNER_TEMP/sfl-${{ matrix.renderer }}-remote-manifest.json"
+          test ! -e "$manifest"
+          docker buildx imagetools inspect --raw "$remote" > "$manifest"
+          python3 scripts/verify_renderer_oci.py registry-manifest "$manifest" \
+            --expected-manifest-digest "$digest" \
+            --expected-config-digest "$EXPECTED_IMAGE_ID"
           test "$(docker image inspect "$TAG" --format '{{.Id}}')" = "$EXPECTED_IMAGE_ID"
+
+          # Future Archive PR validation has no registry credentials.  Prove
+          # that this exact digest is public by discarding both credentials and
+          # the local image before an anonymous inspect and pull.  A newly
+          # created private GHCR package intentionally fails here until its
+          # owner changes package visibility to public and reruns this job.
+          docker logout ghcr.io
+          anonymous_config="$(mktemp -d "$RUNNER_TEMP/sfl-anonymous-docker-config.XXXXXX")"
+          trap 'rm -rf "$anonymous_config"' EXIT
+          test -z "$(find "$anonymous_config" -mindepth 1 -maxdepth 1 -print -quit)"
+          unset DOCKER_AUTH_CONFIG REGISTRY_AUTH_FILE
+          export DOCKER_CONFIG="$anonymous_config"
+          anonymous_manifest="$RUNNER_TEMP/sfl-${{ matrix.renderer }}-anonymous-manifest.json"
+          test ! -e "$anonymous_manifest"
+          if ! docker buildx imagetools inspect --raw "$remote" > "$anonymous_manifest"; then
+            echo '::error::The exact GHCR renderer digest is not anonymously inspectable. Set the package visibility to public, then rerun trusted main.' >&2
+            exit 1
+          fi
+          python3 scripts/verify_renderer_oci.py registry-manifest "$anonymous_manifest" \
+            --expected-manifest-digest "$digest" \
+            --expected-config-digest "$EXPECTED_IMAGE_ID"
+          if ! cmp -s "$manifest" "$anonymous_manifest"; then
+            echo 'anonymous and authenticated exact-digest manifests differ' >&2
+            exit 1
+          fi
+          docker image rm "$TAG" >/dev/null
+          if docker image inspect "$EXPECTED_IMAGE_ID" >/dev/null 2>&1; then
+            docker image rm "$EXPECTED_IMAGE_ID" >/dev/null
+          fi
+          if docker image inspect "$EXPECTED_IMAGE_ID" >/dev/null 2>&1; then
+            echo 'failed to evict the audited local image before the anonymous pull proof' >&2
+            exit 1
+          fi
+          if ! docker pull --platform linux/amd64 "$remote"; then
+            echo '::error::The exact GHCR renderer digest is not anonymously pullable. Set the package visibility to public, then rerun trusted main.' >&2
+            exit 1
+          fi
+          anonymous_inspect="$RUNNER_TEMP/sfl-${{ matrix.renderer }}-anonymous-image-inspect.json"
+          test ! -e "$anonymous_inspect"
+          docker image inspect "$remote" > "$anonymous_inspect"
+          python3 scripts/verify_renderer_oci.py image-config "$anonymous_inspect" \
+            --expected-image-id "$EXPECTED_IMAGE_ID" \
+            --expected-repo-digest "$remote"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Record real disabled-intake build evidence
         shell: bash
@@ -275,6 +362,7 @@ jobs:
             echo "- local audited image id: \`${IMAGE_ID}\`"
             echo "- executable inventory SHA-256: \`${INVENTORY_SHA}\`"
             echo "- registry image: \`${IMAGE}@${DIGEST}\`"
+            echo "- anonymous exact-digest manifest inspect and linux/amd64 pull: passed"
             echo "- v2_intake_enabled=false"
             echo "- this real digest is build evidence only; a later reviewed policy PR must pin it before intake"
           } >> "$GITHUB_STEP_SUMMARY"

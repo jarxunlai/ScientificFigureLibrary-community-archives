@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
 
 EXPECTED_PYTHON = "3.12.12"
 EXPECTED_R = "4.4.3"
+EXPECTED_UID = 65532
+EXPECTED_GID = 65532
 TRUSTED_ENTRYPOINT = "payload/code/render.R"
 EXPECTED_R_PACKAGES = {
     "dplyr": "1.1.4",
@@ -26,7 +29,15 @@ EXPECTED_PYTHON_PACKAGES = {
 }
 
 
+def verify_runtime_identity() -> None:
+    if not hasattr(os, "getuid") or not hasattr(os, "getgid"):
+        raise SystemExit("renderer runtime identity requires Linux UID/GID support")
+    if os.getuid() != EXPECTED_UID or os.getgid() != EXPECTED_GID:
+        raise SystemExit("renderer runtime identity does not match the non-root contract")
+
+
 def verify_runtime() -> None:
+    verify_runtime_identity()
     if ".".join(str(value) for value in sys.version_info[:3]) != EXPECTED_PYTHON:
         raise SystemExit("Python runtime version does not match renderer lock")
     import importlib.metadata

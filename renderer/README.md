@@ -31,11 +31,17 @@ images does not make them an Archive dependency.
 
 The current Windows machine has no running Docker daemon, so it has not built
 or executed these Linux images. Trusted `main` must perform the frozen build,
-verify both runtimes/packages, run a product-neutral negative render canary,
-export and audit the exact image rootfs, and only then push that same local image
-instance. The audit inventories every executable by streamed SHA-256 and rejects
-ordinary shells, package/install/download/build tools, special files, privilege
-bits, and symlink/hard-link aliases to forbidden tools. A real GHCR digest is
+verify the exact linux/amd64 config and UID/GID 65532 runtime under the hardened
+envelope, run a byte-exact product-neutral negative render canary, export and
+audit the exact image rootfs, and only then push that same local image instance.
+The audit includes committed `/run` and `/tmp` trees, inventories every
+executable by streamed SHA-256, reads each executable's bounded shebang, and
+rejects ordinary shells, package/install/download/build tools, special files,
+privilege bits, and symlink/hard-link aliases to forbidden tools. The pushed raw
+single-image manifest must hash to the reported digest and bind that audited
+config. After strict logout, a new empty Docker configuration must anonymously
+inspect and pull the exact digest; a private first-publish GHCR package fails
+closed until its owner deliberately makes it public. A real GHCR digest is
 reported as build evidence. Unknown digests are never represented by
 placeholders: `publishedImageDigest` remains JSON `null` until those real
 digests are reviewed and pinned in a later policy PR.

@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "renderer"))
-from runtime_boundary import forbidden_python_path, forbidden_tool_name  # noqa: E402
+from runtime_boundary import forbidden_python_path, forbidden_tool_name, shell_shebang_line  # noqa: E402
 
 
 INVENTORY_SCHEMA = "figure-library.archive-renderer-rootfs-inventory.v1"
@@ -31,7 +31,11 @@ REQUIRED_EXECUTABLES = (
     "opt/sfl/.pixi/envs/default/bin/python",
     "opt/sfl/runner.py",
 )
-VIRTUAL_TOP_LEVEL = frozenset({"dev", "proc", "run", "sys", "tmp"})
+# ``docker export`` contains the image's committed /run and /tmp trees.  They
+# are not virtual filesystems and must stay inside the executable boundary.
+# Only the mount-backed kernel/device trees are excluded from the image audit.
+VIRTUAL_TOP_LEVEL = frozenset({"dev", "proc", "sys"})
+SHEBANG_LIMIT = 512
 
 @dataclass(frozen=True)
 class RootfsEntry:
@@ -142,6 +146,16 @@ def streamed_member_sha256(handle: tarfile.TarFile, member: tarfile.TarInfo) -> 
     return digest.hexdigest()
 
 
+def member_has_shell_shebang(handle: tarfile.TarFile, member: tarfile.TarInfo) -> bool:
+    """Inspect one bounded line without retaining an executable payload."""
+    source = handle.extractfile(member)
+    if source is None:
+        fail(f"failed to read rootfs regular file: {member.name}")
+    with source:
+        line = source.readline(SHEBANG_LIMIT)
+    return shell_shebang_line(line)
+
+
 def audit_rootfs(archive: Path) -> dict[str, object]:
     if not archive.is_file() or archive.is_symlink():
         fail("rootfs archive must be one regular non-symlink file")
@@ -165,6 +179,7 @@ def audit_rootfs(archive: Path) -> dict[str, object]:
 
         executable_rows: list[dict[str, object]] = []
         digest_cache: dict[str, str] = {}
+        shebang_cache: dict[str, bool] = {}
         for path in sorted(entries):
             entry = entries[path]
             resolved = resolve_file(path, entries)
@@ -175,6 +190,10 @@ def audit_rootfs(archive: Path) -> dict[str, object]:
                 names.add(PurePosixPath(entry.link_target).name)
             if any(forbidden_tool_name(name) for name in names):
                 violations.append(f"forbidden executable identity: {path} resolves to {resolved.path}")
+            if resolved.path not in shebang_cache:
+                shebang_cache[resolved.path] = member_has_shell_shebang(handle, resolved.member)
+            if shebang_cache[resolved.path]:
+                violations.append(f"forbidden shell-shebang executable: {path} resolves to {resolved.path}")
             if resolved.path not in digest_cache:
                 digest_cache[resolved.path] = streamed_member_sha256(handle, resolved.member)
             executable_rows.append(

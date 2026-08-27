@@ -169,7 +169,18 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("v2_intake_enabled=false", workflow)
         self.assertEqual(workflow.count("docker build --pull --platform linux/amd64"), 1)
         self.assertIn("scripts/audit_renderer_rootfs.py rootfs.tar", workflow)
-        self.assertIn("bootstrap runner unexpectedly accepted a product-neutral render request", workflow)
+        self.assertIn("scripts/verify_renderer_oci.py image-config", workflow)
+        self.assertIn("scripts/verify_renderer_oci.py registry-manifest", workflow)
+        self.assertIn("bootstrap runner returned unexpected disabled-intake status", workflow)
+        self.assertIn("--user 65532:65532", workflow)
+        self.assertIn("--workdir /nonexistent", workflow)
+        self.assertIn("docker buildx imagetools inspect --raw", workflow)
+        self.assertIn("--expected-config-digest \"$EXPECTED_IMAGE_ID\"", workflow)
+        self.assertIn("docker logout ghcr.io", workflow)
+        self.assertIn("anonymous_config=", workflow)
+        self.assertIn("unset DOCKER_AUTH_CONFIG REGISTRY_AUTH_FILE", workflow)
+        self.assertIn("docker pull --platform linux/amd64 \"$remote\"", workflow)
+        self.assertIn("--expected-repo-digest \"$remote\"", workflow)
         self.assertIn("Push the exact locally audited image", workflow)
         self.assertLess(workflow.index("Audit the exact image rootfs"), workflow.index("Authenticate to GHCR"))
         self.assertLess(workflow.index("Authenticate to GHCR"), workflow.index("docker push"))
@@ -188,6 +199,14 @@ class PolicyTests(unittest.TestCase):
             "script": "scripts/audit_renderer_rootfs.py",
             "requiresExactPushedImage": True,
             "forbidsToolAliasesAndHardlinks": True,
+            "scansCommittedRunAndTmp": True,
+            "forbidsShellShebangExecutables": True,
+        })
+        self.assertEqual(lock["registryEvidence"], {
+            "requiresSingleLinuxAmd64Manifest": True,
+            "requiresRawManifestDigest": True,
+            "requiresExactConfigDigest": True,
+            "requiresAnonymousExactDigestPull": True,
         })
         self.assertEqual(lock["artifactLockStatus"], "resolved_exact_direct_and_transitive_artifact_hashes")
         artifact_lock = lock["artifactLock"]
@@ -252,10 +271,15 @@ class PolicyTests(unittest.TestCase):
             self.assertIn("COPY runtime_boundary.py sanitize_runtime.py /opt/sfl/bootstrap-tools/", dockerfile)
             self.assertIn("sanitize_runtime.py --root /", dockerfile)
             self.assertIn("rm -rf /opt/sfl/bootstrap-tools", dockerfile)
+            self.assertIn('USER 65532:65532', dockerfile)
+            self.assertIn('WORKDIR /nonexistent', dockerfile)
+            self.assertIn('RUN ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py", "--verify-runtime"]', dockerfile)
+            self.assertIn('ENTRYPOINT ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py"]', dockerfile)
             runner = (context / "runner.py").read_text(encoding="utf-8")
             self.assertIn(f'TRUSTED_ENTRYPOINT = "payload/code/{entrypoint}"', runner)
             self.assertIn("v2 intake is disabled", runner)
             self.assertIn('/opt/sfl/.pixi/envs/default/bin/Rscript', runner)
+            self.assertIn("os.getuid() != EXPECTED_UID or os.getgid() != EXPECTED_GID", runner)
 
     def test_committed_tree_rejects_gitlink_even_with_one_zip(self) -> None:
         archive_path = "archives/example-template/1.0.0/example-template-1.0.0.zip"

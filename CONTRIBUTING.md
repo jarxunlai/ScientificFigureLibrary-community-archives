@@ -56,9 +56,14 @@ for trusted `main`, while `trustedLinuxBuildVerified=false`,
 until the resulting evidence is reviewed.
 
 Only `.github/workflows/publish-renderer-bootstrap.yml`, running from trusted
-`main`, may request `packages: write`. It builds, verifies, inventories, and
-pushes the same image instance, then records the real GHCR digest. It never
-writes an unknown or placeholder digest into the repository. Archive
+`main`, may request `packages: write`. It builds, verifies exact non-root image
+configuration and hardened runtime behavior, inventories every committed
+rootfs tree including `/run` and `/tmp`, and pushes the same image instance.
+It then verifies the raw single-image manifest/config binding and requires an
+anonymous exact-digest inspect and pull after logout before recording the real
+GHCR digest. A private first-publish package fails this gate until its owner
+deliberately changes its visibility to public. It never writes an unknown or
+placeholder digest into the repository. Archive
 pull-request validation remains on the v1 fixed-R container until a later
 reviewed policy change pins those digests and enables v2 intake.
 

@@ -53,3 +53,20 @@ def forbidden_python_path(path: str) -> bool:
         for component in PurePosixPath(path).parts
         for pattern in FORBIDDEN_PYTHON_COMPONENTS
     )
+
+
+def shell_shebang_line(line: bytes) -> bool:
+    """Return whether one bounded first line selects a forbidden shell."""
+    if not line.startswith(b"#!"):
+        return False
+    words = line[2:].decode("utf-8", "replace").strip().split()
+    if not words:
+        return False
+    interpreter = PurePosixPath(words[0]).name.casefold()
+    if interpreter == "env" and len(words) > 1:
+        remaining = words[1:]
+        if remaining and remaining[0] == "-S":
+            remaining = remaining[1:]
+        if remaining:
+            interpreter = PurePosixPath(remaining[0]).name.casefold()
+    return interpreter in SHELL_NAMES

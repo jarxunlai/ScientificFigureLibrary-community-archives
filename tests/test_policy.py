@@ -281,6 +281,8 @@ class PolicyTests(unittest.TestCase):
             self.assertNotIn("rm -rf /opt/sfl/bootstrap-tools", dockerfile)
             self.assertNotIn("groupadd", dockerfile)
             self.assertNotIn("useradd", dockerfile)
+            self.assertIn('COPY --chmod=0555 r_launcher.py /opt/sfl/.pixi/envs/default/lib/R/bin/R', dockerfile)
+            self.assertIn('COPY --chmod=0555 r_launcher.py /opt/sfl/.pixi/envs/default/bin/R', dockerfile)
             self.assertIn('USER 65532:65532', dockerfile)
             self.assertIn('WORKDIR /nonexistent', dockerfile)
             self.assertIn('RUN ["/opt/sfl/.pixi/envs/default/bin/python", "/opt/sfl/runner.py", "--verify-runtime"]', dockerfile)
@@ -290,6 +292,11 @@ class PolicyTests(unittest.TestCase):
             self.assertIn("v2 intake is disabled", runner)
             self.assertIn('/opt/sfl/.pixi/envs/default/bin/Rscript', runner)
             self.assertIn("os.getuid() != EXPECTED_UID or os.getgid() != EXPECTED_GID", runner)
+        r_launcher = (ROOT / "renderer" / "r_launcher.py").read_text(encoding="utf-8")
+        self.assertTrue(r_launcher.startswith("#!/opt/sfl/.pixi/envs/default/bin/python\n"))
+        self.assertNotIn("/bin/sh", r_launcher)
+        self.assertIn('R_EXECUTABLE = f"{R_HOME}/bin/exec/R"', r_launcher)
+        self.assertIn("os.execve(R_EXECUTABLE", r_launcher)
 
     def test_committed_tree_rejects_gitlink_even_with_one_zip(self) -> None:
         archive_path = "archives/example-template/1.0.0/example-template-1.0.0.zip"

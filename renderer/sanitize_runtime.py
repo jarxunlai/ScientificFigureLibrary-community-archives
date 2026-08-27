@@ -107,11 +107,49 @@ def sanitize(root: Path) -> list[str]:
     return sorted(removed)
 
 
+def finalize_runtime(root: Path, runner: Path, bootstrap_tools: Path) -> list[str]:
+    root = root.resolve(strict=True)
+    runner_info = runner.lstat()
+    if not stat.S_ISREG(runner_info.st_mode) or stat.S_ISLNK(runner_info.st_mode):
+        raise ValueError("runner must be a regular non-symlink file")
+    bootstrap_info = bootstrap_tools.lstat()
+    if not stat.S_ISDIR(bootstrap_info.st_mode) or stat.S_ISLNK(bootstrap_info.st_mode):
+        raise ValueError("bootstrap tools must be a regular non-symlink directory")
+    runner = runner.resolve(strict=True)
+    bootstrap_tools = bootstrap_tools.resolve(strict=True)
+    if (
+        root not in runner.parents
+        or root not in bootstrap_tools.parents
+        or bootstrap_tools == root
+        or bootstrap_tools in runner.parents
+    ):
+        raise ValueError("runner and bootstrap tools must be separate paths inside the finalized root")
+    os.chmod(runner, 0o555, follow_symlinks=False)
+    removed = sanitize(root)
+    runner_info = runner.lstat()
+    if (
+        not stat.S_ISREG(runner_info.st_mode)
+        or stat.S_ISLNK(runner_info.st_mode)
+        or (os.name != "nt" and stat.S_IMODE(runner_info.st_mode) != 0o555)
+    ):
+        raise RuntimeError("finalized runner identity or mode changed during sanitization")
+    shutil.rmtree(bootstrap_tools)
+    return removed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("/"))
+    parser.add_argument("--finalize-runner", type=Path)
+    parser.add_argument("--cleanup", type=Path)
     args = parser.parse_args()
-    removed = sanitize(args.root)
+    if (args.finalize_runner is None) != (args.cleanup is None):
+        parser.error("--finalize-runner and --cleanup must be provided together")
+    removed = (
+        finalize_runtime(args.root, args.finalize_runner, args.cleanup)
+        if args.finalize_runner is not None
+        else sanitize(args.root)
+    )
     print(f"sanitized forbidden runtime entries and aliases: {len(removed)}")
     for path in removed:
         print(path)

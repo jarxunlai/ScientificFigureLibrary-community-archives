@@ -5,12 +5,14 @@ import hashlib
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +37,91 @@ python_runner = load("renderer_python_runner", "renderer/python/runner.py")
 
 
 class RendererBootstrapTests(unittest.TestCase):
+    def test_finalize_runtime_uses_python_for_mode_and_bootstrap_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "opt" / "sfl" / "runner.py"
+            tools = root / "opt" / "sfl" / "bootstrap-tools"
+            runner.parent.mkdir(parents=True)
+            tools.mkdir(parents=True)
+            runner.write_text("print('runner')\n", encoding="utf-8")
+            runner.chmod(0o644)
+            (tools / "temporary.py").write_text("pass\n", encoding="utf-8")
+            forbidden = root / "usr" / "bin" / "make"
+            forbidden.parent.mkdir(parents=True)
+            forbidden.write_bytes(b"forbidden build tool")
+
+            removed = sanitize.finalize_runtime(root, runner, tools)
+
+            self.assertEqual(removed, ["usr/bin/make"])
+            self.assertFalse(forbidden.exists())
+            self.assertTrue(runner.is_file())
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(runner.stat().st_mode), 0o555)
+            self.assertFalse(tools.exists())
+
+    def test_finalize_runtime_rejects_unsafe_runner_and_cleanup_relationships(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "opt" / "sfl" / "runner.py"
+            tools = root / "opt" / "sfl" / "bootstrap-tools"
+            runner.parent.mkdir(parents=True)
+            tools.mkdir(parents=True)
+            runner.write_text("print('runner')\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "separate paths"):
+                sanitize.finalize_runtime(root, runner, root)
+            with self.assertRaisesRegex(ValueError, "separate paths"):
+                sanitize.finalize_runtime(root, runner, runner.parent)
+
+            cleanup_file = root / "cleanup-file"
+            cleanup_file.write_text("not a directory\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "regular non-symlink directory"):
+                sanitize.finalize_runtime(root, runner, cleanup_file)
+            self.assertTrue(cleanup_file.is_file())
+
+            outside = root.parent / f"{root.name}-outside"
+            outside.mkdir()
+            try:
+                with self.assertRaisesRegex(ValueError, "inside the finalized root"):
+                    sanitize.finalize_runtime(root, runner, outside)
+                self.assertTrue(outside.is_dir())
+            finally:
+                outside.rmdir()
+
+    def test_finalize_runtime_rejects_symlink_cleanup_without_following_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "runner.py"
+            tools = root / "bootstrap-tools"
+            sibling = root / "must-remain"
+            runner.write_text("print('runner')\n", encoding="utf-8")
+            tools.mkdir()
+            sibling.mkdir()
+            (sibling / "evidence.txt").write_text("retain\n", encoding="utf-8")
+            original_lstat = Path.lstat
+            symlink_info = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+
+            def observed_lstat(path):
+                return symlink_info if path == tools else original_lstat(path)
+
+            with mock.patch.object(Path, "lstat", observed_lstat):
+                with self.assertRaisesRegex(ValueError, "regular non-symlink directory"):
+                    sanitize.finalize_runtime(root, runner, tools)
+            self.assertEqual((sibling / "evidence.txt").read_text(encoding="utf-8"), "retain\n")
+
+    def test_finalize_runtime_rejects_symlink_runner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runner = root / "runner.py"
+            tools = root / "bootstrap-tools"
+            runner.write_text("print('runner')\n", encoding="utf-8")
+            tools.mkdir()
+            symlink_info = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            with mock.patch.object(Path, "lstat", return_value=symlink_info):
+                with self.assertRaisesRegex(ValueError, "regular non-symlink"):
+                    sanitize.finalize_runtime(root, runner, tools)
+
     @staticmethod
     def write_tar(path: Path, entries: list[tuple[str, bytes, int, bytes | None]]) -> None:
         """Write (path, type, mode, payload/link target) entries."""

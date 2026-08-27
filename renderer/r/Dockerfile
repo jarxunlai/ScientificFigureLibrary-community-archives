@@ -22,10 +22,7 @@ ENV PATH="/opt/sfl/.pixi/envs/default/bin" \
     R_HOME="/opt/sfl/.pixi/envs/default/lib/R" \
     MPLCONFIGDIR="/tmp/sfl-matplotlib"
 
-RUN set -eux; \
-    chmod 0555 /opt/sfl/runner.py; \
-    /opt/sfl/.pixi/envs/default/bin/python /opt/sfl/bootstrap-tools/sanitize_runtime.py --root /; \
-    rm -rf /opt/sfl/bootstrap-tools
+RUN ["/opt/sfl/.pixi/envs/default/bin/python", "-B", "/opt/sfl/bootstrap-tools/sanitize_runtime.py", "--root", "/", "--finalize-runner", "/opt/sfl/runner.py", "--cleanup", "/opt/sfl/bootstrap-tools"]
 
 USER 65532:65532
 WORKDIR /nonexistent

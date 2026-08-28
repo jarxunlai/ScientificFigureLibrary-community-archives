@@ -1,0 +1,29 @@
+name: validate-policy-pr
+run-name: sfl-archive-policy-scripts head=${{ github.event.pull_request.head.sha }}
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/validate-policy-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: sfl-community-archive-policy-scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout policy candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run policy unit tests from the PR head
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover --start-directory tests --pattern 'test_*.py'

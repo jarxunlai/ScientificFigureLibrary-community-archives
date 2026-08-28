@@ -153,6 +153,14 @@ class PolicyTests(unittest.TestCase):
         self.assertNotIn("steps.policy.outputs.mode", workflow)
         self.assertNotIn("withdrawal", workflow.lower())
 
+    def test_policy_script_workflow_runs_from_pr_head(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "validate-policy-pr.yml").read_text(encoding="utf-8")
+        self.assertIn("pull_request:", workflow)
+        self.assertNotIn("pull_request_target:", workflow)
+        self.assertIn("python3 -m unittest discover --start-directory tests --pattern 'test_*.py'", workflow)
+        self.assertNotIn("compare_pr_trees.py", workflow)
+        self.assertNotIn("packages: write", workflow)
+
     def test_renderer_publish_workflow_is_trusted_main_only(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "publish-renderer-bootstrap.yml").read_text(encoding="utf-8")
         self.assertIn("branches: [main]", workflow)
@@ -802,9 +810,9 @@ class V2ArchivePolicyTests(unittest.TestCase):
             self.extract(files)
 
     def test_real_v2_pr26_zip_passes_static_validation(self) -> None:
-        sample = Path(r"E:\plot\tests\20260828\sc-marker-dotplot-highlight-boxes-1.0.1.zip")
+        sample = ROOT / "tests" / "fixtures" / "sc-marker-dotplot-highlight-boxes-1.0.1.zip"
         if not sample.is_file():
-            self.skipTest("PR #26 sample ZIP is not on this machine")
+            self.skipTest("optional PR #26 sample ZIP fixture is not present")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             archive.extract_and_validate(

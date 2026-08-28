@@ -373,6 +373,7 @@ class PolicyTests(unittest.TestCase):
             archive.post_render(staging, rendered)
 
     def test_post_render_reads_v2_nested_preview_identity(self) -> None:
+        """v2 receipts nest width/height/RGBA under preview."""
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             staging = root / "submission"

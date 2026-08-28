@@ -1191,10 +1191,11 @@ def post_render(staging: Path, rendered: Path) -> None:
     if not rendered.is_file() or rendered.is_symlink():
         fail("sandbox render output must be a regular non-symlink file")
     receipt = read_json(staging, "render-receipt.json")
-    expected_width = receipt.get("width")
-    expected_height = receipt.get("height")
-    expected_rgba = receipt.get("canonicalRgbaSha256")
-    archived_preview_sha = receipt.get("previewSha256")
+    preview_meta = receipt.get("preview") if isinstance(receipt.get("preview"), dict) else {}
+    expected_width = preview_meta.get("width", receipt.get("width"))
+    expected_height = preview_meta.get("height", receipt.get("height"))
+    expected_rgba = preview_meta.get("canonicalRgbaSha256", receipt.get("canonicalRgbaSha256"))
+    archived_preview_sha = preview_meta.get("sha256", receipt.get("previewSha256"))
     if not isinstance(expected_width, int) or isinstance(expected_width, bool) or not isinstance(expected_height, int) or isinstance(expected_height, bool) or expected_width < 1 or expected_height < 1:
         fail("render receipt has invalid preview dimensions")
     if not isinstance(expected_rgba, str) or not SHA256.fullmatch(expected_rgba):

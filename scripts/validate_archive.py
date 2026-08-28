@@ -434,7 +434,7 @@ def validate_submission_contract(
     preview = (staging / "payload" / "preview" / "preview.png").read_bytes()
     if receipt.get("previewBytes") != len(preview) or receipt.get("previewSha256") != sha256_bytes(preview) or receipt.get("mediaType") != "image/png":
         fail("archived preview disagrees with render receipt")
-    width, height, rgba = decode_png_rgba(preview)
+    width, height, rgba = decode_png_rgba(preview, strict_chunks=False)
     if receipt.get("width") != width or receipt.get("height") != height or receipt.get("canonicalRgbaSha256") != sha256_bytes(rgba):
         fail("preview pixel identity disagrees with render receipt")
 
@@ -565,6 +565,402 @@ def validate_zip_structure(archive: Path) -> None:
         fail("ZIP entries must be unique and canonically ordered")
 
 
+
+CODE_LICENSES_V2 = {"MIT", "Apache-2.0", "BSD-3-Clause", "GPL-3.0"}
+CONTENT_LICENSES_V2 = {"CC-BY-4.0", "CC0-1.0", "CC-BY-SA-4.0"}
+EXCLUDED_PRIVATE_STATE_V2 = [
+    "library.json", "libraryId", "series/history", "working revisions", "operations", "receipts",
+    "imports", "quarantine", "locator", "absolute machine paths", "unselected assets", "other templates",
+]
+V2_TOP_LEVEL = {
+    "submission.json", "licenses.json", "render-receipt.json", "inventory.jsonl", "assets.jsonl",
+}
+
+
+def parse_jsonl_objects(path: Path, label: str) -> list[dict]:
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        fail(f"{label} must be UTF-8 without BOM")
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except Exception as exc:
+        fail(f"invalid {label}: {exc}")
+    rows: list[dict] = []
+    for index, line in enumerate(lines, start=1):
+        if not line:
+            fail(f"{label} contains an empty line")
+        try:
+            item = json.loads(line)
+        except Exception as exc:
+            fail(f"invalid {label} line {index}: {exc}")
+        if not isinstance(item, dict):
+            fail(f"{label} line {index} must be an object")
+        rows.append(item)
+    return rows
+
+
+def optional_exact_keys(value: object, required: set[str], optional: set[str], label: str) -> dict:
+    if not isinstance(value, dict):
+        fail(f"{label} must be an object")
+    actual = set(value)
+    missing = sorted(required - actual)
+    extra = sorted(actual - required - optional)
+    if missing or extra:
+        fail(f"{label} fields differ: missing={missing}, extra={extra}")
+    return value
+
+
+def validate_submission_contract_v2(
+    staging: Path,
+    observed: set[str],
+    expected_template_id: str,
+    expected_release_version: str,
+) -> set[str]:
+    submission = exact_keys(read_json(staging, "submission.json"), {
+        "schema", "providerId", "templateId", "releaseVersion", "contentDigest",
+        "publicAssetKind", "language", "parentLocalRelease", "assets",
+        "rightsAttestation", "excludedPrivateState", "createdAt",
+    }, "publication submission v2")
+    template = exact_keys(read_json(staging, "payload/template.json"), {
+        "schema", "providerId", "templateId", "releaseVersion", "contentDigest",
+        "publicAssetKind", "language", "metadata", "licenses", "render", "codeExecutedBySflClient",
+    }, "public-template archive v2")
+    if submission["schema"] != "figure-library.publication-submission.v2":
+        fail("unsupported publication-submission schema")
+    if template["schema"] != "figure-library.public-template-archive.v2":
+        fail("unsupported public-template archive schema")
+    if "publicAssetKind" in read_json(staging, "submission.json") and submission["schema"].endswith(".v1"):
+        fail("hybrid v1 submission with v2 keys is forbidden")
+    if submission["providerId"] != PROVIDER or template["providerId"] != PROVIDER:
+        fail("central providerId mismatch")
+    template_id = submission["templateId"]
+    version = submission["releaseVersion"]
+    content_digest = submission["contentDigest"]
+    if not isinstance(template_id, str) or not valid_template_id(template_id):
+        fail("invalid templateId")
+    if not isinstance(version, str) or not SEMVER.fullmatch(version):
+        fail("invalid strict SemVer 2.0 releaseVersion")
+    if not isinstance(content_digest, str) or not SHA256.fullmatch(content_digest):
+        fail("invalid contentDigest")
+    if (
+        template["templateId"] != template_id or template["releaseVersion"] != version or
+        template["contentDigest"] != content_digest
+    ):
+        fail("submission/template identity mismatch")
+    validate_expected_archive_identity(template_id, version, expected_template_id, expected_release_version)
+    kind = submission["publicAssetKind"]
+    language = submission["language"]
+    if kind not in {"plot_template", "visual_reference"}:
+        fail("publicAssetKind is invalid")
+    if language not in {"R", "Python"}:
+        fail("language is invalid")
+    if template["publicAssetKind"] != kind or template["language"] != language:
+        fail("template publicAssetKind/language mismatch")
+    if template["codeExecutedBySflClient"] is not False:
+        fail("template must state codeExecutedBySflClient=false")
+
+    parent = exact_keys(submission["parentLocalRelease"], {
+        "relationship", "explicitlySelectedAssetsOnly", "privateLifecycleIdentifiersIncluded",
+    }, "publication-export parentLocalRelease")
+    if parent != {
+        "relationship": "sanitized-export-from-local-published",
+        "explicitlySelectedAssetsOnly": True,
+        "privateLifecycleIdentifiersIncluded": False,
+    }:
+        fail("publication-export parentLocalRelease is invalid")
+    if submission["excludedPrivateState"] != EXCLUDED_PRIVATE_STATE_V2:
+        fail("excludedPrivateState must match the canonical v2 exclusion list")
+    if not isinstance(submission["createdAt"], str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", submission["createdAt"], re.ASCII
+    ):
+        fail("createdAt must be an RFC 3339 UTC timestamp")
+
+    assets_meta = exact_keys(submission["assets"], {"schema", "path", "count", "bytes", "sha256"}, "submission.assets")
+    if assets_meta["schema"] != "figure-library.publication-assets.v2" or assets_meta["path"] != "assets.jsonl":
+        fail("submission.assets must point at assets.jsonl")
+    assets_path = staging / "assets.jsonl"
+    assets_bytes = assets_path.read_bytes()
+    if (
+        not isinstance(assets_meta["count"], int) or isinstance(assets_meta["count"], bool) or
+        not isinstance(assets_meta["bytes"], int) or isinstance(assets_meta["bytes"], bool) or
+        assets_meta["bytes"] != len(assets_bytes) or
+        not isinstance(assets_meta["sha256"], str) or not SHA256.fullmatch(assets_meta["sha256"]) or
+        assets_meta["sha256"] != sha256_bytes(assets_bytes)
+    ):
+        fail("submission.assets identity differs from assets.jsonl")
+
+    rows = parse_jsonl_objects(assets_path, "assets.jsonl")
+    if assets_meta["count"] != len(rows):
+        fail("submission.assets.count differs from assets.jsonl")
+
+    payload_files = sorted(name for name in observed if name.startswith("payload/"))
+    declared: dict[str, dict] = {}
+    code_paths: list[str] = []
+    data_paths: list[str] = []
+    preview_path = None
+    preview_trace: list[str] = []
+    role_licenses: dict[str, str] = {}
+    for index, raw in enumerate(rows, start=1):
+        asset = optional_exact_keys(
+            raw,
+            {"schema", "path", "role", "bytes", "sha256", "mediaType", "license", "provenance"},
+            {"generatedFrom"},
+            f"assets.jsonl[{index}]",
+        )
+        if asset["schema"] != "figure-library.publication-assets.v2":
+            fail(f"assets.jsonl[{index}] schema is invalid")
+        name = canonical_path(asset["path"])
+        role = asset["role"]
+        if role not in {"code", "synthetic_data", "preview", "documentation"}:
+            fail(f"assets.jsonl[{index}] role is invalid")
+        prefix = {
+            "code": "payload/code/",
+            "synthetic_data": "payload/data/",
+            "preview": "payload/preview/",
+            "documentation": "payload/docs/",
+        }[role]
+        if not name.startswith(prefix):
+            fail(f"assets.jsonl[{index}] role/path mismatch")
+        if role == "preview" and name != "payload/preview/preview.png":
+            fail("public Archive v2 preview path must be payload/preview/preview.png")
+        if role == "code" and not re.search(r"\.(?:R|r|py)$", name):
+            fail("public Archive v2 code only permits .R, .r, and .py files")
+        if name in declared or name not in observed:
+            fail(f"invalid, duplicate, or absent declared asset: {name}")
+        data = (staging / Path(*name.split("/"))).read_bytes()
+        if (
+            not isinstance(asset["bytes"], int) or isinstance(asset["bytes"], bool) or asset["bytes"] != len(data) or
+            not isinstance(asset["sha256"], str) or not SHA256.fullmatch(asset["sha256"]) or asset["sha256"] != sha256_bytes(data)
+        ):
+            fail(f"assets.jsonl identity mismatch: {name}")
+        license_name = asset["license"]
+        if role == "code":
+            if license_name not in CODE_LICENSES_V2:
+                fail(f"assets.jsonl[{index}] code license is invalid")
+        elif license_name not in CONTENT_LICENSES_V2:
+            fail(f"assets.jsonl[{index}] content license is invalid")
+        if role in role_licenses and role_licenses[role] != license_name:
+            fail(f"assets.jsonl mixes licenses inside the {role} role")
+        role_licenses[role] = license_name
+        provenance = exact_keys(asset["provenance"], {"kind"}, f"assets.jsonl[{index}].provenance")
+        kind_name = provenance["kind"]
+        if kind_name not in {"clean_room", "generated", "synthetic", "authored"}:
+            fail(f"assets.jsonl[{index}] provenance is invalid")
+        if role == "code" and kind_name not in {"clean_room", "authored"}:
+            fail("public Archive v2 code provenance is invalid")
+        if role == "synthetic_data" and kind_name != "synthetic":
+            fail("public Archive v2 data must be synthetic")
+        if role == "preview" and kind_name != "generated":
+            fail("public Archive v2 preview must be generated")
+        if role == "documentation" and kind_name not in {"clean_room", "authored"}:
+            fail("public Archive v2 documentation provenance is invalid")
+        generated = asset.get("generatedFrom")
+        if role == "preview":
+            if not isinstance(generated, list) or not generated:
+                fail("preview generatedFrom is required")
+            preview_trace = path_list(generated, "preview generatedFrom")
+            preview_path = name
+        elif generated is not None:
+            fail("only the preview asset may carry generatedFrom")
+        if role == "code":
+            code_paths.append(name)
+        elif role == "synthetic_data":
+            if asset["bytes"] == 0:
+                fail("public Archive v2 synthetic data cannot be an empty placeholder")
+            data_paths.append(name)
+        declared[name] = asset
+
+    expected_payload = set(declared)
+    extra_payload = sorted(set(payload_files) - expected_payload - {"payload/template.json"})
+    missing_payload = sorted(expected_payload - set(payload_files))
+    if extra_payload or missing_payload:
+        fail(f"assets.jsonl does not cover payload files: missing={missing_payload}, extra={extra_payload}")
+    if "payload/template.json" not in observed:
+        fail("payload/template.json is required")
+
+    has_r = "payload/code/render.R" in declared
+    has_py = "payload/code/render.py" in declared
+    if has_r == has_py:
+        fail("public Archive v2 requires exactly one of payload/code/render.R or payload/code/render.py")
+    entrypoint = "payload/code/render.R" if has_r else "payload/code/render.py"
+    derived_language = "R" if has_r else "Python"
+    if language != derived_language:
+        fail("language must be derived from the unique render entrypoint")
+    if preview_path != "payload/preview/preview.png":
+        fail("public Archive v2 requires one preview.png")
+    if kind == "plot_template" and not data_paths:
+        fail("public Archive v2 plot_template requires synthetic data")
+    expected_trace = sorted(code_paths + data_paths)
+    if sorted(preview_trace) != expected_trace or len(preview_trace) != len(set(preview_trace)):
+        fail("preview generatedFrom must exactly cover all included code and data paths")
+
+    licenses = optional_exact_keys(
+        read_json(staging, "licenses.json"),
+        {"schema", "code", "preview"},
+        {"syntheticData", "documentation"},
+        "licenses.json",
+    )
+    if licenses["schema"] != "figure-library.publication-licenses.v2":
+        fail("licenses.json schema is invalid")
+    if licenses["code"] not in CODE_LICENSES_V2 or licenses["preview"] not in CONTENT_LICENSES_V2:
+        fail("licenses.json mandatory licenses are invalid")
+    if licenses.get("syntheticData") not in (None, *tuple(CONTENT_LICENSES_V2)):
+        fail("licenses.json syntheticData is invalid")
+    if licenses.get("documentation") not in (None, *tuple(CONTENT_LICENSES_V2)):
+        fail("licenses.json documentation is invalid")
+    if licenses["code"] != role_licenses.get("code") or licenses["preview"] != role_licenses.get("preview"):
+        fail("licenses.json mandatory role licenses differ from assets.jsonl")
+    if licenses.get("syntheticData") != role_licenses.get("synthetic_data"):
+        fail("licenses.json syntheticData differs from assets.jsonl")
+    if licenses.get("documentation") != role_licenses.get("documentation"):
+        fail("licenses.json documentation differs from assets.jsonl")
+    if ("syntheticData" in licenses) != ("synthetic_data" in role_licenses):
+        fail("licenses.json syntheticData must exist only when synthetic data is present")
+    if ("documentation" in licenses) != ("documentation" in role_licenses):
+        fail("licenses.json documentation must exist only when documentation is present")
+
+    rights = exact_keys(submission["rightsAttestation"], {
+        "publisher", "codeRightsConfirmed", "dataAttestation", "generatedPreviewConfirmed",
+        "noThirdPartyMediaConfirmed", "immutableReleaseAcknowledged",
+    }, "rightsAttestation")
+    nonempty_text(rights["publisher"], "rightsAttestation.publisher", 200)
+    if any(rights[name] is not True for name in (
+        "codeRightsConfirmed", "generatedPreviewConfirmed", "noThirdPartyMediaConfirmed", "immutableReleaseAcknowledged"
+    )):
+        fail("publication-export rightsAttestation is incomplete")
+    attestation = rights["dataAttestation"]
+    if data_paths or kind == "plot_template":
+        exact_keys(attestation, {"kind", "confirmed"}, "dataAttestation")
+        if attestation != {"kind": "synthetic_data_included", "confirmed": True}:
+            fail("submission data attestation must confirm included synthetic data")
+    else:
+        exact_keys(attestation, {"kind", "acknowledged"}, "dataAttestation")
+        if attestation != {"kind": "no_data_required_for_visual_reference", "acknowledged": True}:
+            fail("submission data attestation must acknowledge a data-free visual_reference")
+
+    metadata = exact_keys(template["metadata"], {
+        "title", "description", "application", "dataProfile", "plotFamily", "language", "tags",
+        "provenance", "upstreamStatus", "publisherVerified", "curationStatus", "renderValidation",
+        "localReviewStatus", "plotExecutionByRecipient",
+    }, "template.metadata")
+    for field in ("title", "description", "application", "dataProfile", "plotFamily"):
+        nonempty_text(metadata[field], f"template.metadata.{field}", 4000 if field != "title" else 300)
+    if metadata["language"] != derived_language:
+        fail("template.metadata.language differs from the derived language")
+    if metadata["upstreamStatus"] != "published" or metadata["publisherVerified"] is not False or metadata["curationStatus"] != "unreviewed" or metadata["renderValidation"] != "publisher_attested" or metadata["localReviewStatus"] != "not_reviewed" or metadata["plotExecutionByRecipient"] != "not_run":
+        fail("public template six-field status is invalid")
+    if not isinstance(metadata["tags"], list):
+        fail("template.metadata.tags must be an array")
+    for item in metadata["tags"]:
+        nonempty_text(item, "template.metadata.tags[]", 100)
+    if not isinstance(metadata["provenance"], list):
+        fail("template.metadata.provenance must be an array")
+    for item in metadata["provenance"]:
+        exact_keys(item, {"type", "value"}, "template.metadata.provenance")
+        if item["type"] not in {"doi", "url", "inspiration", "note"}:
+            fail("template.metadata.provenance type is invalid")
+        nonempty_text(item["value"], "template.metadata.provenance.value")
+
+    template_licenses = optional_exact_keys(template["licenses"], {"code", "preview"}, {"syntheticData", "documentation"}, "template.licenses")
+    expected_template_licenses = {key: licenses[key] for key in licenses if key != "schema"}
+    if template_licenses != expected_template_licenses:
+        fail("Archive template licenses differ from licenses.json")
+    render = exact_keys(template["render"], {
+        "entrypoint", "previewPath", "sourceCode", "sourceData", "canonicalRgbaSha256",
+    }, "template.render")
+    if render["entrypoint"] != entrypoint or render["previewPath"] != "payload/preview/preview.png":
+        fail("template.render entrypoint/previewPath mismatch")
+    if path_list(render["sourceCode"], "template.render.sourceCode") != sorted(code_paths):
+        fail("template.render.sourceCode must list every code asset")
+    if path_list(render["sourceData"], "template.render.sourceData", allow_empty=True) != sorted(data_paths):
+        fail("template.render.sourceData must list every data asset")
+    preview = (staging / Path("payload/preview/preview.png")).read_bytes()
+    width, height, rgba = decode_png_rgba(preview, strict_chunks=False)
+    if not isinstance(render["canonicalRgbaSha256"], str) or not SHA256.fullmatch(render["canonicalRgbaSha256"]) or render["canonicalRgbaSha256"] != sha256_bytes(rgba):
+        fail("template.render.canonicalRgbaSha256 mismatch")
+
+    receipt = exact_keys(read_json(staging, "render-receipt.json"), {
+        "schema", "language", "entrypoint", "codeAssets", "dataAssets", "preview",
+        "generatedFrom", "environment", "sourceExecution", "codeExecutedBySflClient",
+    }, "render-receipt.json")
+    if receipt["schema"] != "figure-library.render-receipt.v2":
+        fail("render-receipt.json schema is invalid")
+    if (
+        receipt["language"] != derived_language or receipt["entrypoint"] != entrypoint or
+        receipt["sourceExecution"] != "publisher_attested" or receipt["codeExecutedBySflClient"] is not False
+    ):
+        fail("render receipt v2 trace is invalid")
+    if path_list(receipt["generatedFrom"], "render.generatedFrom") != preview_trace:
+        fail("render receipt generatedFrom must match preview generatedFrom")
+    if not isinstance(receipt["codeAssets"], list) or not isinstance(receipt["dataAssets"], list):
+        fail("render receipt asset identity arrays are invalid")
+    receipt_code = [exact_keys(item, {"path", "bytes", "sha256"}, "render.codeAssets[]") for item in receipt["codeAssets"]]
+    receipt_data = [exact_keys(item, {"path", "bytes", "sha256"}, "render.dataAssets[]") for item in receipt["dataAssets"]]
+    def identities(paths: list[str]) -> list[dict]:
+        output = []
+        for name in paths:
+            data = (staging / Path(*name.split("/"))).read_bytes()
+            output.append({"path": name, "bytes": len(data), "sha256": sha256_bytes(data)})
+        return output
+    if receipt_code != identities(sorted(code_paths)) and {item["path"] for item in receipt_code} != set(code_paths):
+        # allow either canonical order or set-equal identities
+        if sorted(receipt_code, key=lambda item: item["path"]) != identities(sorted(code_paths)):
+            fail("render receipt codeAssets identity mismatch")
+    if sorted(receipt_data, key=lambda item: item["path"]) != identities(sorted(data_paths)):
+        fail("render receipt dataAssets identity mismatch")
+    preview_meta = exact_keys(receipt["preview"], {
+        "path", "bytes", "sha256", "mediaType", "width", "height", "canonicalRgbaSha256",
+    }, "render.preview")
+    if (
+        preview_meta["path"] != "payload/preview/preview.png" or preview_meta["bytes"] != len(preview) or
+        preview_meta["sha256"] != sha256_bytes(preview) or preview_meta["mediaType"] != "image/png" or
+        preview_meta["width"] != width or preview_meta["height"] != height or
+        preview_meta["canonicalRgbaSha256"] != sha256_bytes(rgba)
+    ):
+        fail("render receipt preview identity mismatch")
+    environment = exact_keys(receipt["environment"], {"runtime", "runtimeVersion", "renderer", "dependencies"}, "render.environment")
+    if environment["runtime"] != derived_language:
+        fail("render.environment.runtime must match language")
+    nonempty_text(environment["runtimeVersion"], "render.environment.runtimeVersion", 100)
+    nonempty_text(environment["renderer"], "render.environment.renderer", 400)
+    if not isinstance(environment["dependencies"], list):
+        fail("render.environment.dependencies must be an array")
+    for item in environment["dependencies"]:
+        exact_keys(item, {"name", "version"}, "render.environment.dependencies[]")
+        nonempty_text(item["name"], "dependency.name", 200)
+        nonempty_text(item["version"], "dependency.version", 100)
+
+    template_licenses_for_digest = None  # contentDigest is trusted via file identities and traces
+    return set(code_paths) | set(data_paths)
+
+
+
+def build_isolated_render_root_v2_optional_data(staging: Path, render_root: Path, render_files: set[str]) -> None:
+    if render_root.exists():
+        fail("isolated render root must not exist")
+    try:
+        render_root.relative_to(staging)
+    except ValueError:
+        pass
+    else:
+        fail("isolated render root must be outside the extracted archive")
+    if "payload/code/render.R" not in render_files and "payload/code/render.py" not in render_files:
+        fail("isolated render root lacks the fixed entrypoint")
+    for name in render_files:
+        canonical_path(name)
+        if not (name.startswith("payload/code/") or name.startswith("payload/data/")):
+            fail(f"isolated render root contains a non-render asset: {name}")
+    render_root.mkdir(parents=True)
+    for name in sorted(render_files):
+        source = staging / Path(*name.split("/"))
+        if not source.is_file() or source.is_symlink():
+            fail(f"isolated render input is not a regular extracted file: {name}")
+        target = render_root / Path(*name.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as input_handle, target.open("xb") as output_handle:
+            shutil.copyfileobj(input_handle, output_handle, length=1024 * 1024)
+
+
 def extract_and_validate(
     archive: Path,
     staging: Path,
@@ -616,11 +1012,46 @@ def extract_and_validate(
             with handle.open(info, "r") as source, target.open("xb") as destination:
                 shutil.copyfileobj(source, destination, length=1024 * 1024)
 
+    observed = {path.relative_to(staging).as_posix() for path in staging.rglob("*") if path.is_file()}
+    if "submission.json" not in observed:
+        fail("archive is missing required files: ['submission.json']")
+    schema = read_json(staging, "submission.json").get("schema")
+    if schema == "figure-library.publication-submission.v2":
+        required = {
+            "submission.json", "licenses.json", "render-receipt.json", "inventory.jsonl",
+            "assets.jsonl", "payload/template.json", "payload/preview/preview.png",
+        }
+        has_r = "payload/code/render.R" in observed
+        has_py = "payload/code/render.py" in observed
+        if has_r == has_py:
+            fail("public Archive v2 requires exactly one of payload/code/render.R or payload/code/render.py")
+        required.add("payload/code/render.R" if has_r else "payload/code/render.py")
+        missing = sorted(required - observed)
+        if missing:
+            fail(f"archive is missing required files: {missing}")
+        kind = read_json(staging, "submission.json").get("publicAssetKind")
+        if kind == "plot_template" and not any(name.startswith("payload/data/") for name in observed):
+            fail("archive contains no synthetic input data")
+        unexpected_top_level = sorted(
+            name for name in observed if "/" not in name and name not in V2_TOP_LEVEL
+        )
+        if unexpected_top_level:
+            fail(f"archive contains unexpected top-level files: {unexpected_top_level}")
+        validate_inventory(staging, observed)
+        validate_private_text(staging, observed)
+        render_files = validate_submission_contract_v2(
+            staging, observed, expected_template_id, expected_release_version,
+        )
+        if any(name.startswith('payload/data/') for name in render_files):
+            build_isolated_render_root(staging, render_root, render_files)
+        else:
+            build_isolated_render_root_v2_optional_data(staging, render_root, render_files)
+        return
+
     required = {
         "submission.json", "licenses.json", "render-receipt.json", "inventory.jsonl",
         "payload/template.json", "payload/code/render.R", "payload/preview/preview.png",
     }
-    observed = {path.relative_to(staging).as_posix() for path in staging.rglob("*") if path.is_file()}
     missing = sorted(required - observed)
     if missing:
         fail(f"archive is missing required files: {missing}")
@@ -636,13 +1067,14 @@ def extract_and_validate(
     build_isolated_render_root(staging, render_root, render_files)
 
 
+
 def paeth(a: int, b: int, c: int) -> int:
     p = a + b - c
     pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
     return a if pa <= pb and pa <= pc else b if pb <= pc else c
 
 
-def decode_png_rgba(data: bytes) -> tuple[int, int, bytes]:
+def decode_png_rgba(data: bytes, *, strict_chunks: bool = True) -> tuple[int, int, bytes]:
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         fail("preview is not a PNG")
     offset = 8
@@ -663,8 +1095,12 @@ def decode_png_rgba(data: bytes) -> tuple[int, int, bytes]:
         if len(payload) != length or (binascii.crc32(kind + payload) & 0xFFFFFFFF) != crc:
             fail("PNG chunk length/CRC is invalid")
         offset += 12 + length
-        if kind not in {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"}:
-            fail(f"PNG chunk {kind!r} is outside the metadata-free publication dialect")
+        allowed = {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"}
+        if kind not in allowed:
+            if strict_chunks:
+                fail(f"PNG chunk {kind!r} is outside the metadata-free publication dialect")
+            offset  # keep walking; ancillary chunks are ignored for v2 RGBA
+            continue
         chunks.append(kind)
         if kind == b"IHDR":
             if ihdr is not None or len(chunks) != 1 or length != 13:
@@ -679,7 +1115,9 @@ def decode_png_rgba(data: bytes) -> tuple[int, int, bytes]:
                 fail("PNG tRNS order or singleton contract is invalid")
             transparency = payload
         elif kind == b"IDAT":
-            if ihdr is None or idat or not payload:
+            if ihdr is None or not payload:
+                fail("PNG must contain a non-empty IDAT chunk after IHDR")
+            if idat and strict_chunks:
                 fail("PNG must contain exactly one non-empty IDAT chunk")
             idat.extend(payload)
         elif kind == b"IEND":

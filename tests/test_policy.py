@@ -340,7 +340,7 @@ class PolicyTests(unittest.TestCase):
             staging = root / "submission"
             staging.mkdir()
             rendered = root / "preview.png"
-            png = self.png()
+            png = PolicyTests.png()
             rendered.write_bytes(png)
             (staging / "render-receipt.json").write_text(json.dumps({
                 "width": 1,
@@ -385,7 +385,7 @@ class PolicyTests(unittest.TestCase):
         def chunk(kind: bytes, payload: bytes) -> bytes:
             return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", binascii.crc32(kind + payload) & 0xFFFFFFFF)
 
-        png = self.png()
+        png = PolicyTests.png()
         for kind in (b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"vpAg"):
             candidate = png[:-12] + chunk(kind, b"hidden metadata") + png[-12:]
             with self.subTest(kind=kind), self.assertRaisesRegex(SystemExit, "metadata-free publication dialect"):
@@ -603,6 +603,218 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "regular non-symlink"):
                 archive.post_render(staging, symlink)  # type: ignore[arg-type]
             self.assertFalse(symlink.read_attempted)
+
+
+
+class V2ArchivePolicyTests(unittest.TestCase):
+    def v2_files(self, *, generated_from=None, include_assets=True, extra=None):
+        png = PolicyTests.png()
+        code = b"args <- commandArgs(trailingOnly = TRUE)\n# clean room renderer\n"
+        data = b"group,value\nA,1\nB,2\n"
+        code_sha = hashlib.sha256(code).hexdigest()
+        data_sha = hashlib.sha256(data).hexdigest()
+        png_sha = hashlib.sha256(png).hexdigest()
+        width, height, rgba = archive.decode_png_rgba(png, strict_chunks=False)
+        rgba_sha = hashlib.sha256(rgba).hexdigest()
+        trace = generated_from if generated_from is not None else [
+            "payload/code/render.R",
+            "payload/data/example.csv",
+        ]
+        assets_rows = [
+            {
+                "schema": "figure-library.publication-assets.v2",
+                "path": "payload/code/render.R",
+                "role": "code",
+                "bytes": len(code),
+                "sha256": code_sha,
+                "mediaType": "text/x-r",
+                "license": "MIT",
+                "provenance": {"kind": "authored"},
+            },
+            {
+                "schema": "figure-library.publication-assets.v2",
+                "path": "payload/data/example.csv",
+                "role": "synthetic_data",
+                "bytes": len(data),
+                "sha256": data_sha,
+                "mediaType": "text/csv",
+                "license": "CC-BY-4.0",
+                "provenance": {"kind": "synthetic"},
+            },
+            {
+                "schema": "figure-library.publication-assets.v2",
+                "path": "payload/preview/preview.png",
+                "role": "preview",
+                "bytes": len(png),
+                "sha256": png_sha,
+                "mediaType": "image/png",
+                "license": "CC-BY-4.0",
+                "provenance": {"kind": "generated"},
+                "generatedFrom": trace,
+            },
+        ]
+        assets_jsonl = "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in assets_rows).encode("utf-8")
+        digest = "a" * 64
+        submission = {
+            "schema": "figure-library.publication-submission.v2",
+            "providerId": "io.github.jarxunlai.scientific-figure-community",
+            "templateId": "clean-room-bars",
+            "releaseVersion": "1.0.0",
+            "contentDigest": digest,
+            "publicAssetKind": "plot_template",
+            "language": "R",
+            "parentLocalRelease": {
+                "relationship": "sanitized-export-from-local-published",
+                "explicitlySelectedAssetsOnly": True,
+                "privateLifecycleIdentifiersIncluded": False,
+            },
+            "assets": {
+                "schema": "figure-library.publication-assets.v2",
+                "path": "assets.jsonl",
+                "count": 3,
+                "bytes": len(assets_jsonl),
+                "sha256": hashlib.sha256(assets_jsonl).hexdigest(),
+            },
+            "rightsAttestation": {
+                "publisher": "jarxunlai",
+                "codeRightsConfirmed": True,
+                "dataAttestation": {"kind": "synthetic_data_included", "confirmed": True},
+                "generatedPreviewConfirmed": True,
+                "noThirdPartyMediaConfirmed": True,
+                "immutableReleaseAcknowledged": True,
+            },
+            "excludedPrivateState": [
+                "library.json", "libraryId", "series/history", "working revisions", "operations", "receipts",
+                "imports", "quarantine", "locator", "absolute machine paths", "unselected assets", "other templates",
+            ],
+            "createdAt": "2026-08-28T00:00:00Z",
+        }
+        template = {
+            "schema": "figure-library.public-template-archive.v2",
+            "providerId": "io.github.jarxunlai.scientific-figure-community",
+            "templateId": "clean-room-bars",
+            "releaseVersion": "1.0.0",
+            "contentDigest": digest,
+            "publicAssetKind": "plot_template",
+            "language": "R",
+            "metadata": {
+                "title": "Clean room bars",
+                "description": "Synthetic bar plot.",
+                "application": "unit test",
+                "dataProfile": "group,value",
+                "plotFamily": "bar",
+                "language": "R",
+                "tags": ["test"],
+                "provenance": [{"type": "note", "value": "synthetic unit fixture"}],
+                "upstreamStatus": "published",
+                "publisherVerified": False,
+                "curationStatus": "unreviewed",
+                "renderValidation": "publisher_attested",
+                "localReviewStatus": "not_reviewed",
+                "plotExecutionByRecipient": "not_run",
+            },
+            "licenses": {"code": "MIT", "preview": "CC-BY-4.0", "syntheticData": "CC-BY-4.0"},
+            "render": {
+                "entrypoint": "payload/code/render.R",
+                "previewPath": "payload/preview/preview.png",
+                "sourceCode": ["payload/code/render.R"],
+                "sourceData": ["payload/data/example.csv"],
+                "canonicalRgbaSha256": rgba_sha,
+            },
+            "codeExecutedBySflClient": False,
+        }
+        receipt = {
+            "schema": "figure-library.render-receipt.v2",
+            "language": "R",
+            "entrypoint": "payload/code/render.R",
+            "codeAssets": [{"path": "payload/code/render.R", "bytes": len(code), "sha256": code_sha}],
+            "dataAssets": [{"path": "payload/data/example.csv", "bytes": len(data), "sha256": data_sha}],
+            "preview": {
+                "path": "payload/preview/preview.png",
+                "bytes": len(png),
+                "sha256": png_sha,
+                "mediaType": "image/png",
+                "width": width,
+                "height": height,
+                "canonicalRgbaSha256": rgba_sha,
+            },
+            "generatedFrom": trace,
+            "environment": {
+                "runtime": "R",
+                "runtimeVersion": "4.4.3",
+                "renderer": "ggplot2::ggsave",
+                "dependencies": [{"name": "ggplot2", "version": "3.5.2"}],
+            },
+            "sourceExecution": "publisher_attested",
+            "codeExecutedBySflClient": False,
+        }
+        files = {
+            "licenses.json": json.dumps({
+                "schema": "figure-library.publication-licenses.v2",
+                "code": "MIT",
+                "preview": "CC-BY-4.0",
+                "syntheticData": "CC-BY-4.0",
+            }, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            "payload/code/render.R": code,
+            "payload/data/example.csv": data,
+            "payload/preview/preview.png": png,
+            "payload/template.json": json.dumps(template, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            "render-receipt.json": json.dumps(receipt, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            "submission.json": json.dumps(submission, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        }
+        if include_assets:
+            files["assets.jsonl"] = assets_jsonl
+        if extra:
+            files.update(extra)
+        inventory = [
+            {"path": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in sorted(files.items())
+        ]
+        files["inventory.jsonl"] = "".join(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in inventory
+        ).encode("utf-8")
+        return files
+
+    def extract(self, files):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "archive.zip"
+            archive_path.write_bytes(PolicyTests.canonical_zip(files))
+            archive.extract_and_validate(
+                archive_path,
+                root / "submission",
+                root / "render-root",
+                "clean-room-bars",
+                "1.0.0",
+            )
+
+    def test_v2_plot_template_with_assets_jsonl_is_accepted(self) -> None:
+        self.extract(self.v2_files())
+
+    def test_v2_missing_assets_jsonl_is_rejected(self) -> None:
+        files = self.v2_files(include_assets=False)
+        with self.assertRaisesRegex(SystemExit, "assets.jsonl"):
+            self.extract(files)
+
+    def test_v2_preview_generated_from_must_cover_code_and_data(self) -> None:
+        files = self.v2_files(generated_from=["payload/code/render.R"])
+        with self.assertRaisesRegex(SystemExit, "generatedFrom"):
+            self.extract(files)
+
+    def test_real_v2_pr26_zip_passes_static_validation(self) -> None:
+        sample = Path(r"E:\plot\tests\20260828\sc-marker-dotplot-highlight-boxes-1.0.1.zip")
+        if not sample.is_file():
+            self.skipTest("PR #26 sample ZIP is not on this machine")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive.extract_and_validate(
+                sample,
+                root / "submission",
+                root / "render-root",
+                "sc-marker-dotplot-highlight-boxes",
+                "1.0.1",
+            )
+
 
 
 if __name__ == "__main__":

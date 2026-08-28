@@ -19,6 +19,7 @@ if (file.exists(output_png)) {
   stop("render output must not pre-exist", call. = FALSE)
 }
 
+log_file <- tempfile("sfl-render-", fileext = ".log")
 status <- system2(
   file.path(R.home("bin"), "Rscript"),
   c(
@@ -27,12 +28,14 @@ status <- system2(
     "--input-dir", input_dir,
     "--output", output_png
   ),
-  stdout = "/dev/null",
-  stderr = "/dev/null",
+  stdout = log_file,
+  stderr = log_file,
   wait = TRUE,
   timeout = 150
 )
 if (!identical(status, 0L)) {
+  details <- tryCatch(paste(readLines(log_file, warn = FALSE), collapse = "\n"), error = function(e) "")
+  if (nzchar(details)) message(details)
   stop(sprintf("render entrypoint failed with status %s", status), call. = FALSE)
 }
 if (!file.exists(output_png) || file.info(output_png)$size <= 0) {

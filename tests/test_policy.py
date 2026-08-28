@@ -372,6 +372,25 @@ class PolicyTests(unittest.TestCase):
             }), encoding="utf-8")
             archive.post_render(staging, rendered)
 
+    def test_post_render_reads_v2_nested_preview_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "submission"
+            staging.mkdir()
+            rendered = root / "preview.png"
+            png = PolicyTests.png()
+            rendered.write_bytes(png)
+            (staging / "render-receipt.json").write_text(json.dumps({
+                "schema": "figure-library.render-receipt.v2",
+                "preview": {
+                    "width": 1,
+                    "height": 1,
+                    "canonicalRgbaSha256": hashlib.sha256(bytes((20, 40, 60, 255))).hexdigest(),
+                    "sha256": hashlib.sha256(png).hexdigest(),
+                },
+            }), encoding="utf-8")
+            archive.post_render(staging, rendered)
+
     def test_post_render_requires_canonical_rgba_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

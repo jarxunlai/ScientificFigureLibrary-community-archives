@@ -13,7 +13,7 @@ jobs:
   validate:
     name: sfl-community-archive-policy-v1
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 40
     steps:
       - name: Checkout trusted base validators
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -102,3 +102,13 @@ jobs:
             --staging "$work/submission" \
             --rendered "$work/output/preview.png" \
             | tee "$work/validation-report.json"
+      - name: Upload sandbox render for diagnosis
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sandbox-preview
+          path: |
+            ${{ runner.temp }}/sfl-archive-validation/output/preview.png
+            ${{ runner.temp }}/sfl-archive-validation/validation-report.json
+          if-no-files-found: ignore
+

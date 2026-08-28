@@ -8,7 +8,7 @@ Every normal pull request adds exactly one new path:
 archives/<templateId>/<releaseVersion>/<templateId>-<releaseVersion>.zip
 ```
 
-Existing releases are never overwritten. A GitHub-hosted runner validates the ZIP structure and rights manifest, then executes only its fixed R render entrypoint inside a reviewed, non-root, network-disabled, read-only container. The generated PNG must match the archived preview and its canonical RGBA digest. A maintainer reviews and manually merges the PR. Automation never merges it.
+Existing releases are never overwritten. A GitHub-hosted runner validates the ZIP structure and rights manifest, then executes only its fixed R render entrypoint inside a reviewed, non-root, network-disabled, read-only container. The sandbox re-render must match the archived preview width, height, and canonical RGBA digest. Raw PNG encoder bytes may differ across hosts. A maintainer reviews and manually merges the PR. Automation never merges it.
 
 The archive tree is strictly append-only: every committed path and blob identity must remain unchanged. A release that is withdrawn or redacted from discovery is represented by Catalog lifecycle metadata; its immutable Archive ZIP is retained here for audit. There is no physical-deletion route in the Archive pull-request policy.
 

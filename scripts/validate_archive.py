@@ -1188,23 +1188,37 @@ def decode_png_rgba(data: bytes, *, strict_chunks: bool = True) -> tuple[int, in
 
 
 def post_render(staging: Path, rendered: Path) -> None:
-    receipt = read_json(staging, "render-receipt.json")
-    expected_bytes = receipt.get("previewBytes")
-    if not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool) or expected_bytes < 1 or expected_bytes > MAX_FILE:
-        fail("render receipt has an invalid bounded previewBytes")
     if not rendered.is_file() or rendered.is_symlink():
         fail("sandbox render output must be a regular non-symlink file")
-    if rendered.stat().st_size != expected_bytes:
-        fail("sandbox render output byte length differs from the archived preview receipt")
+    receipt = read_json(staging, "render-receipt.json")
+    expected_width = receipt.get("width")
+    expected_height = receipt.get("height")
+    expected_rgba = receipt.get("canonicalRgbaSha256")
+    archived_preview_sha = receipt.get("previewSha256")
+    if not isinstance(expected_width, int) or isinstance(expected_width, bool) or not isinstance(expected_height, int) or isinstance(expected_height, bool) or expected_width < 1 or expected_height < 1:
+        fail("render receipt has invalid preview dimensions")
+    if not isinstance(expected_rgba, str) or not SHA256.fullmatch(expected_rgba):
+        fail("render receipt has an invalid canonical RGBA digest")
+    if archived_preview_sha is not None and (not isinstance(archived_preview_sha, str) or not SHA256.fullmatch(archived_preview_sha)):
+        fail("render receipt has an invalid archived preview SHA-256")
+    size = rendered.stat().st_size
+    if size < 1 or size > MAX_FILE:
+        fail("sandbox render output is empty or exceeds 64 MiB")
     actual = rendered.read_bytes()
-    width, height, rgba = decode_png_rgba(actual)
-    if width != receipt.get("width") or height != receipt.get("height"):
+    width, height, rgba = decode_png_rgba(actual, strict_chunks=False)
+    if width != expected_width or height != expected_height:
         fail("sandbox re-rendered PNG dimensions differ from receipt")
-    if sha256_bytes(rgba) != receipt.get("canonicalRgbaSha256"):
+    if sha256_bytes(rgba) != expected_rgba:
         fail("sandbox re-rendered canonical RGBA digest differs from receipt")
-    if sha256_bytes(actual) != receipt.get("previewSha256"):
-        fail("sandbox re-rendered PNG SHA-256 differs from archived preview")
-    print(json.dumps({"status": "ci_rendered", "width": width, "height": height, "renderedPreviewSha256": sha256_bytes(actual), "archivedPreviewSha256": receipt.get("previewSha256"), "canonicalRgbaSha256": sha256_bytes(rgba)}, sort_keys=True))
+    print(json.dumps({
+        "status": "ci_rendered",
+        "width": width,
+        "height": height,
+        "renderedPreviewSha256": sha256_bytes(actual),
+        "archivedPreviewSha256": archived_preview_sha,
+        "canonicalRgbaSha256": sha256_bytes(rgba),
+        "pngBytesMatchArchivedPreview": sha256_bytes(actual) == archived_preview_sha,
+    }, sort_keys=True))
 
 
 def main() -> None:

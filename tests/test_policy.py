@@ -145,6 +145,17 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaisesRegex(SystemExit, "preserve every existing path"):
                 compare.validate_archive_tree_change(base, candidate)
 
+
+    def test_intake_container_installs_plot_packages(self) -> None:
+        dockerfile = (ROOT / "container" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("rocker/r-ver:4.4.3@sha256:aa952afb35853aaf5c67bd224aa969caf6ad49395d69cf19a586f1554ed3bd05", dockerfile)
+        self.assertIn("install.packages(c('ggplot2','readr','ragg')", dockerfile)
+        self.assertIn("fonts-liberation", dockerfile)
+        self.assertTrue((ROOT / "container" / "99-sfl-arial.conf").is_file())
+        runner = (ROOT / "container" / "run-render.R").read_text(encoding="utf-8")
+        self.assertNotIn('stdout = "/dev/null"', runner)
+        self.assertIn("log_file", runner)
+
     def test_pr_workflow_runs_trusted_unit_tests_and_has_no_withdrawal_route(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "validate-archive-pr.yml").read_text(encoding="utf-8")
         self.assertIn("name: sfl-community-archive-policy-v1", workflow)
@@ -152,6 +163,9 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("python3 trusted/scripts/compare_pr_trees.py", workflow)
         self.assertNotIn("steps.policy.outputs.mode", workflow)
         self.assertNotIn("withdrawal", workflow.lower())
+        self.assertIn("timeout-minutes: 40", workflow)
+        self.assertIn("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
+
 
     def test_policy_script_workflow_runs_from_pr_head(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "validate-policy-pr.yml").read_text(encoding="utf-8")
@@ -342,7 +356,7 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "canonical RGBA payload exceeds"):
             archive.decode_png_rgba(png)
 
-    def test_post_render_requires_exact_archived_png_sha(self) -> None:
+    def test_post_render_accepts_encoder_png_bytes_when_rgba_matches(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             staging = root / "submission"
@@ -353,11 +367,26 @@ class PolicyTests(unittest.TestCase):
             (staging / "render-receipt.json").write_text(json.dumps({
                 "width": 1,
                 "height": 1,
-                "previewBytes": len(png),
                 "canonicalRgbaSha256": hashlib.sha256(bytes((20, 40, 60, 255))).hexdigest(),
                 "previewSha256": "0" * 64,
             }), encoding="utf-8")
-            with self.assertRaisesRegex(SystemExit, "PNG SHA-256 differs"):
+            archive.post_render(staging, rendered)
+
+    def test_post_render_requires_canonical_rgba_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "submission"
+            staging.mkdir()
+            rendered = root / "preview.png"
+            png = PolicyTests.png()
+            rendered.write_bytes(png)
+            (staging / "render-receipt.json").write_text(json.dumps({
+                "width": 1,
+                "height": 1,
+                "canonicalRgbaSha256": "0" * 64,
+                "previewSha256": hashlib.sha256(png).hexdigest(),
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "canonical RGBA digest differs"):
                 archive.post_render(staging, rendered)
 
     def test_archive_rejects_every_undeclared_nested_file(self) -> None:
@@ -586,9 +615,13 @@ class PolicyTests(unittest.TestCase):
             staging = root / "submission"
             staging.mkdir()
             rendered = root / "preview.png"
-            rendered.write_bytes(self.png())
-            (staging / "render-receipt.json").write_text(json.dumps({"previewBytes": len(self.png()) + 1}), encoding="utf-8")
-            with self.assertRaisesRegex(SystemExit, "byte length differs"):
+            rendered.write_bytes(b"")
+            (staging / "render-receipt.json").write_text(json.dumps({
+                "width": 1,
+                "height": 1,
+                "canonicalRgbaSha256": "0" * 64,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "empty or exceeds"):
                 archive.post_render(staging, rendered)
 
             class SymlinkOutput:

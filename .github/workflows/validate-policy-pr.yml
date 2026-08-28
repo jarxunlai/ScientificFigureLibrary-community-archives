@@ -8,6 +8,7 @@ on:
       - "scripts/**"
       - "tests/**"
       - ".github/workflows/validate-policy-pr.yml"
+      - "container/**"
 
 permissions:
   contents: read
